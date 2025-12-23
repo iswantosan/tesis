@@ -22,6 +22,7 @@ __all__ = (
     "Concat",
     "RepConv",
     "Index",
+    "SPDConv",
 )
 
 
@@ -348,3 +349,70 @@ class Index(nn.Module):
         Expects a list of tensors as input.
         """
         return x[self.index]
+
+
+class SPDConv(nn.Module):
+    """
+    Spatial to Depth Convolution (SPD-Conv).
+    
+    Replaces strided convolution with a Space-to-Depth transformation followed by a non-strided convolution.
+    Reference: https://arxiv.org/abs/2208.03641
+    
+    Args:
+        c1: Input channels
+        c2: Output channels
+        k: Kernel size (default: 1)
+        s: Stride (default: 1, typically 2 for downsampling)
+        p: Padding (default: None, auto-calculated)
+        g: Groups (default: 1)
+        d: Dilation (default: 1)
+        act: Activation function (default: True, uses SiLU)
+    """
+
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """Initialize SPDConv layer."""
+        super().__init__()
+        self.conv = None
+        self.s = s  # stride
+        
+        if s == 1:
+            # For stride 1, just use regular convolution
+            self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        else:
+            # For stride > 1, use Space-to-Depth transformation
+            # Space-to-Depth increases channels by s^2, so we need to adjust input channels
+            self.conv = nn.Conv2d(c1 * s * s, c2, k, 1, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+    def forward(self, x):
+        """Apply SPD-Conv transformation."""
+        if self.s == 1:
+            return self.act(self.bn(self.conv(x)))
+        
+        # Space-to-Depth transformation (inverse of pixel shuffle)
+        # For stride s, convert sxs spatial blocks to s^2 channels
+        B, C, H, W = x.shape
+        # Split into sxs blocks
+        x = x.view(B, C, H // self.s, self.s, W // self.s, self.s)
+        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()  # B, C, s, s, H//s, W//s
+        x = x.view(B, C * self.s * self.s, H // self.s, W // self.s)  # B, C*s*s, H//s, W//s
+        
+        # Apply non-strided convolution
+        return self.act(self.bn(self.conv(x)))
+
+    def forward_fuse(self, x):
+        """Apply convolution and activation without batch normalization."""
+        if self.s == 1:
+            return self.act(self.conv(x))
+        
+        # Space-to-Depth transformation
+        B, C, H, W = x.shape
+        x = x.view(B, C, H // self.s, self.s, W // self.s, self.s)
+        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
+        x = x.view(B, C * self.s * self.s, H // self.s, W // self.s)
+        
+        return self.act(self.conv(x))
