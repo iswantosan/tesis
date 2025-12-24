@@ -958,7 +958,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
-        m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module
+        if "nn." in m:
+            m = getattr(torch.nn, m[3:])
+        else:
+            # Get module from globals, with fallback to ultralytics.nn.modules
+            try:
+                m = globals()[m]
+            except KeyError:
+                # Fallback: import from ultralytics.nn.modules dynamically
+                import importlib
+                modules = importlib.import_module("ultralytics.nn.modules")
+                m = getattr(modules, m)
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
