@@ -935,6 +935,15 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     """Parse a YOLO model.yaml dictionary into a PyTorch model."""
     import ast
+    
+    # Ensure all imported modules are available in globals
+    # This fixes issues where modules might not be in globals() namespace
+    import sys
+    if "ultralytics.nn.modules" in sys.modules:
+        modules_dict = sys.modules["ultralytics.nn.modules"].__dict__
+        for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect"]:
+            if name in modules_dict and name not in globals():
+                globals()[name] = modules_dict[name]
 
     # Args
     legacy = True  # backward compatibility for v3/v5/v8/v9 models
@@ -962,13 +971,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             m = getattr(torch.nn, m[3:])
         else:
             # Get module from globals, with fallback to ultralytics.nn.modules
-            try:
+            if m in globals():
                 m = globals()[m]
-            except KeyError:
+            else:
                 # Fallback: import from ultralytics.nn.modules dynamically
-                import importlib
-                modules = importlib.import_module("ultralytics.nn.modules")
-                m = getattr(modules, m)
+                try:
+                    from ultralytics.nn import modules as ultralytics_modules
+                    m = getattr(ultralytics_modules, m)
+                except (AttributeError, ImportError):
+                    # Last resort: direct import
+                    import sys
+                    if "ultralytics.nn.modules" not in sys.modules:
+                        import importlib
+                        importlib.import_module("ultralytics.nn.modules")
+                    m = sys.modules["ultralytics.nn.modules"].__dict__[m]
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -1012,6 +1028,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             A2C2f,
             SPDConv,
+            ECA,
+            CoordAtt,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)

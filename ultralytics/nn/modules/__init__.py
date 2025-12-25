@@ -66,8 +66,10 @@ from .conv import (
     Conv,
     Conv2,
     ConvTranspose,
+    CoordAtt,
     DWConv,
     DWConvTranspose2d,
+    ECA,
     Focus,
     GhostConv,
     Index,
@@ -164,4 +166,6 @@ __all__ = (
     "Index",
     "A2C2f",
     "SPDConv",
+    "ECA",
+    "CoordAtt",
 )
