@@ -950,31 +950,28 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     import sys
     import importlib
     
-    # Ensure ECA and CoordAtt are in globals (they should be imported at module level)
-    if ECA is not None and "ECA" not in globals():
-        globals()["ECA"] = ECA
-    if CoordAtt is not None and "CoordAtt" not in globals():
-        globals()["CoordAtt"] = CoordAtt
+    # Force import ECA and CoordAtt and add to globals
+    try:
+        from ultralytics.nn.modules.conv import ECA as ECA_module, CoordAtt as CoordAtt_module
+        globals()["ECA"] = ECA_module
+        globals()["CoordAtt"] = CoordAtt_module
+        # Also add to modules namespace
+        if "ultralytics.nn.modules" in sys.modules:
+            modules_dict = sys.modules["ultralytics.nn.modules"]
+            setattr(modules_dict, "ECA", ECA_module)
+            setattr(modules_dict, "CoordAtt", CoordAtt_module)
+    except ImportError:
+        pass
     
-    # Also ensure they're in the modules namespace for fallback access
+    # Copy other modules to globals if needed
     if "ultralytics.nn.modules" in sys.modules:
-        modules_dict = sys.modules["ultralytics.nn.modules"]
-        if ECA is not None and not hasattr(modules_dict, "ECA"):
-            setattr(modules_dict, "ECA", ECA)
-        if CoordAtt is not None and not hasattr(modules_dict, "CoordAtt"):
-            setattr(modules_dict, "CoordAtt", CoordAtt)
-        
-        # Also add to __dict__ for direct access
-        modules_dict_dict = sys.modules["ultralytics.nn.modules"].__dict__
-        if ECA is not None and "ECA" not in modules_dict_dict:
-            modules_dict_dict["ECA"] = ECA
-        if CoordAtt is not None and "CoordAtt" not in modules_dict_dict:
-            modules_dict_dict["CoordAtt"] = CoordAtt
-        
-        # Copy other modules to globals
-        for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect"]:
-            if name in modules_dict_dict and name not in globals():
-                globals()[name] = modules_dict_dict[name]
+        try:
+            modules_dict = sys.modules["ultralytics.nn.modules"]
+            for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect"]:
+                if hasattr(modules_dict, name) and name not in globals():
+                    globals()[name] = getattr(modules_dict, name)
+        except Exception:
+            pass
 
     # Args
     legacy = True  # backward compatibility for v3/v5/v8/v9 models
