@@ -67,9 +67,16 @@ from ultralytics.nn.modules import (
     WorldDetect,
     v10Detect,
     A2C2f,
-    ECA,
-    CoordAtt,
 )
+
+# Import ECA and CoordAtt directly from conv module to ensure they're available
+# This is necessary because they might not be properly exported in some cases
+try:
+    from ultralytics.nn.modules.conv import ECA, CoordAtt
+except ImportError:
+    # Fallback: define as None if import fails
+    ECA = None
+    CoordAtt = None
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -943,21 +950,31 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     import sys
     import importlib
     
-    # Force import of modules to ensure ECA and CoordAtt are available
-    try:
-        from ultralytics.nn.modules import ECA, CoordAtt
-        if "ECA" not in globals():
-            globals()["ECA"] = ECA
-        if "CoordAtt" not in globals():
-            globals()["CoordAtt"] = CoordAtt
-    except ImportError:
-        pass
+    # Ensure ECA and CoordAtt are in globals (they should be imported at module level)
+    if ECA is not None and "ECA" not in globals():
+        globals()["ECA"] = ECA
+    if CoordAtt is not None and "CoordAtt" not in globals():
+        globals()["CoordAtt"] = CoordAtt
     
+    # Also ensure they're in the modules namespace for fallback access
     if "ultralytics.nn.modules" in sys.modules:
-        modules_dict = sys.modules["ultralytics.nn.modules"].__dict__
-        for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect", "ECA", "CoordAtt"]:
-            if name in modules_dict and name not in globals():
-                globals()[name] = modules_dict[name]
+        modules_dict = sys.modules["ultralytics.nn.modules"]
+        if ECA is not None and not hasattr(modules_dict, "ECA"):
+            setattr(modules_dict, "ECA", ECA)
+        if CoordAtt is not None and not hasattr(modules_dict, "CoordAtt"):
+            setattr(modules_dict, "CoordAtt", CoordAtt)
+        
+        # Also add to __dict__ for direct access
+        modules_dict_dict = sys.modules["ultralytics.nn.modules"].__dict__
+        if ECA is not None and "ECA" not in modules_dict_dict:
+            modules_dict_dict["ECA"] = ECA
+        if CoordAtt is not None and "CoordAtt" not in modules_dict_dict:
+            modules_dict_dict["CoordAtt"] = CoordAtt
+        
+        # Copy other modules to globals
+        for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect"]:
+            if name in modules_dict_dict and name not in globals():
+                globals()[name] = modules_dict_dict[name]
 
     # Args
     legacy = True  # backward compatibility for v3/v5/v8/v9 models
