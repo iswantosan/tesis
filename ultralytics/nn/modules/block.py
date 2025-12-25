@@ -31,6 +31,8 @@ __all__ = (
     "Bottleneck",
     "BottleneckCSP",
     "Proto",
+    "ECA",
+    "CoordAtt",
     "RepC3",
     "ResNetLayer",
     "RepNCSPELAN4",
