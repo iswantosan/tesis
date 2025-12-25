@@ -941,6 +941,18 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     # Ensure all imported modules are available in globals
     # This fixes issues where modules might not be in globals() namespace
     import sys
+    import importlib
+    
+    # Force import of modules to ensure ECA and CoordAtt are available
+    try:
+        from ultralytics.nn.modules import ECA, CoordAtt
+        if "ECA" not in globals():
+            globals()["ECA"] = ECA
+        if "CoordAtt" not in globals():
+            globals()["CoordAtt"] = CoordAtt
+    except ImportError:
+        pass
+    
     if "ultralytics.nn.modules" in sys.modules:
         modules_dict = sys.modules["ultralytics.nn.modules"].__dict__
         for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect", "ECA", "CoordAtt"]:
@@ -981,12 +993,32 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                     from ultralytics.nn import modules as ultralytics_modules
                     m = getattr(ultralytics_modules, m)
                 except (AttributeError, ImportError):
-                    # Last resort: direct import
-                    import sys
-                    if "ultralytics.nn.modules" not in sys.modules:
+                    # Last resort: direct import from conv module for ECA and CoordAtt
+                    if m in ("ECA", "CoordAtt"):
+                        try:
+                            from ultralytics.nn.modules.conv import ECA, CoordAtt
+                            if m == "ECA":
+                                m = ECA
+                            elif m == "CoordAtt":
+                                m = CoordAtt
+                        except ImportError:
+                            raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
+                    else:
+                        # Last resort: direct import
+                        import sys
                         import importlib
-                        importlib.import_module("ultralytics.nn.modules")
-                    m = sys.modules["ultralytics.nn.modules"].__dict__[m]
+                        if "ultralytics.nn.modules" not in sys.modules:
+                            importlib.import_module("ultralytics.nn.modules")
+                        modules_dict = sys.modules["ultralytics.nn.modules"]
+                        # Try getattr first
+                        try:
+                            m = getattr(modules_dict, m)
+                        except AttributeError:
+                            # Fallback to __dict__
+                            if hasattr(modules_dict, '__dict__') and m in modules_dict.__dict__:
+                                m = modules_dict.__dict__[m]
+                            else:
+                                raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
