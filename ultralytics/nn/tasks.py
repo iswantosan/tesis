@@ -38,14 +38,17 @@ from ultralytics.nn.modules import (
     CBFuse,
     CBAM,
     CBLinear,
+    ChannelAttention,
     Classify,
     Concat,
     Conv,
     Conv2,
     ConvTranspose,
+    CoordAtt,
     Detect,
     DWConv,
     DWConvTranspose2d,
+    ECA,
     Focus,
     GhostBottleneck,
     GhostConv,
@@ -68,15 +71,6 @@ from ultralytics.nn.modules import (
     v10Detect,
     A2C2f,
 )
-
-# Import ECA and CoordAtt directly from conv module to ensure they're available
-# This is necessary because they might not be properly exported in some cases
-try:
-    from ultralytics.nn.modules.conv import ECA, CoordAtt
-except ImportError:
-    # Fallback: define as None if import fails
-    ECA = None
-    CoordAtt = None
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -944,34 +938,6 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     """Parse a YOLO model.yaml dictionary into a PyTorch model."""
     import ast
-    
-    # Ensure all imported modules are available in globals
-    # This fixes issues where modules might not be in globals() namespace
-    import sys
-    import importlib
-    
-    # Force import ECA and CoordAtt and add to globals
-    try:
-        from ultralytics.nn.modules.conv import ECA as ECA_module, CoordAtt as CoordAtt_module
-        globals()["ECA"] = ECA_module
-        globals()["CoordAtt"] = CoordAtt_module
-        # Also add to modules namespace
-        if "ultralytics.nn.modules" in sys.modules:
-            modules_dict = sys.modules["ultralytics.nn.modules"]
-            setattr(modules_dict, "ECA", ECA_module)
-            setattr(modules_dict, "CoordAtt", CoordAtt_module)
-    except ImportError:
-        pass
-    
-    # Copy other modules to globals if needed
-    if "ultralytics.nn.modules" in sys.modules:
-        try:
-            modules_dict = sys.modules["ultralytics.nn.modules"]
-            for name in ["CBAM", "SPDConv", "A2C2f", "C3k2", "SPPF", "Concat", "Detect"]:
-                if hasattr(modules_dict, name) and name not in globals():
-                    globals()[name] = getattr(modules_dict, name)
-        except Exception:
-            pass
 
     # Args
     legacy = True  # backward compatibility for v3/v5/v8/v9 models
@@ -1145,6 +1111,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m is ChannelAttention:
+            # ChannelAttention(channels) - channels must match input
+            input_channels = ch[f] if isinstance(f, int) else sum(ch[x] for x in f if isinstance(x, int))
+            args = [input_channels]  # Override args to use actual input channels
+            c2 = input_channels  # Output channels = input channels
         else:
             c2 = ch[f]
 
