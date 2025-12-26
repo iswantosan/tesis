@@ -973,32 +973,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                     from ultralytics.nn import modules as ultralytics_modules
                     m = getattr(ultralytics_modules, m)
                 except (AttributeError, ImportError):
-                    # Last resort: direct import from conv module for ECA and CoordAtt
-                    if m in ("ECA", "CoordAtt"):
-                        try:
-                            from ultralytics.nn.modules.conv import ECA, CoordAtt
-                            if m == "ECA":
-                                m = ECA
-                            elif m == "CoordAtt":
-                                m = CoordAtt
-                        except ImportError:
+                    # Last resort: direct import
+                    import sys
+                    import importlib
+                    if "ultralytics.nn.modules" not in sys.modules:
+                        importlib.import_module("ultralytics.nn.modules")
+                    modules_dict = sys.modules["ultralytics.nn.modules"]
+                    # Try getattr first
+                    try:
+                        m = getattr(modules_dict, m)
+                    except AttributeError:
+                        # Fallback to __dict__
+                        if hasattr(modules_dict, '__dict__') and m in modules_dict.__dict__:
+                            m = modules_dict.__dict__[m]
+                        else:
                             raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
-                    else:
-                        # Last resort: direct import
-                        import sys
-                        import importlib
-                        if "ultralytics.nn.modules" not in sys.modules:
-                            importlib.import_module("ultralytics.nn.modules")
-                        modules_dict = sys.modules["ultralytics.nn.modules"]
-                        # Try getattr first
-                        try:
-                            m = getattr(modules_dict, m)
-                        except AttributeError:
-                            # Fallback to __dict__
-                            if hasattr(modules_dict, '__dict__') and m in modules_dict.__dict__:
-                                m = modules_dict.__dict__[m]
-                            else:
-                                raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
