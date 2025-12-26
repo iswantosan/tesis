@@ -30,25 +30,22 @@ backbone:
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 6], 1, Concat, [1]] # cat backbone P4
-  - [-1, 2, A2C2f, [512, False, -1]] # 11
+  - [-1, 1, BConcat, [512]] # 11
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 2, A2C2f, [256, False, -1]] # 14
+  - [-1, 1, BConcat, [256]] # 14
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 1], 1, Concat, [1]] # cat backbone P2 (256+128=384 channels)
-  - [-1, 1, Conv, [128, 1, 1]] # reduce channels (384->128, langsung ke target)
-  - [-1, 1, SpatialAttention, [7]] # SpatialAttention untuk spatial focus
-  - [-1, 1, ChannelAttention, [128]] # ChannelAttention: channel akan di-set otomatis sesuai input
-  - [-1, 2, A2C2f, [128, False, -1]] # 17 P2 output untuk Detect
+  - [[-1, 1], 1, Concat, [1]] # cat backbone P2
+  - [-1, 1, BConcat, [128]] # 17
 
   - [-1, 1, Conv, [128, 3, 2]]
-  - [[-1, 14], 1, Concat, [1]] # cat head P3 (layer 14 adalah A2C2f dari P3)
-  - [-1, 2, A2C2f, [256, False, -1]] # 20 P3 output untuk Detect
+  - [[-1, 14], 1, Concat, [1]] # cat head P3
+  - [-1, 1, BConcat, [256]] # 20
 
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 11], 1, Concat, [1]] # cat head P4
-  - [-1, 2, C3k2, [512, False]] # 23 P4 output untuk Detect
+  - [-1, 1, BConcat, [512]] # 23
 
   - [[17, 20, 23], 1, Detect, [nc]] # Detect(P2, P3, P4)
