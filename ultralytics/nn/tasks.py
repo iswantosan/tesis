@@ -47,6 +47,7 @@ from ultralytics.nn.modules import (
     CoordAtt,
     Detect,
     DWConv,
+    GSConv,
     DWConvTranspose2d,
     ECA,
     Focus,
