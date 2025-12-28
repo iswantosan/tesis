@@ -1462,7 +1462,8 @@ class RFB(nn.Module):
     def __init__(self, c1, c2, scale=0.25):
         """Initialize RFB module."""
         super().__init__()
-        c_ = max(8, int(c2 * scale))  # hidden channels, ensure at least 8 for stability
+        # Calculate hidden channels - ensure reasonable size
+        c_ = max(8, min(int(c2 * scale), c2 // 4))
         
         # 1x1 conv branch
         self.branch1 = Conv(c1, c_, 1, 1)
@@ -1483,7 +1484,7 @@ class RFB(nn.Module):
             Conv(c1, c_, 1, 1)
         )
         
-        # Output fusion
+        # Output fusion - ensure output channels match c2
         self.conv_out = Conv(5 * c_, c2, 1, 1)
     
     def forward(self, x):
@@ -1530,7 +1531,8 @@ class C2fRFB(C2f):
         """Initialize C2fRFB module."""
         super().__init__(c1, c2, n=n, e=e)
         # Replace Bottleneck blocks with RFB blocks
-        self.m = nn.ModuleList(RFB(self.c, self.c, scale=0.5) for _ in range(n))
+        # Use smaller scale for RFB to avoid channel issues
+        self.m = nn.ModuleList(RFB(self.c, self.c, scale=0.25) for _ in range(n))
 
 
 class MSFF(nn.Module):
