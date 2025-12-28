@@ -1,0 +1,66 @@
+# YOLO-FMS 🚀, AGPL-3.0 license
+# YOLO-FMS: A Lightweight and Efficient Model for Medical Microscopic Smear Detection
+# Based on YOLOv5 architecture with GSConv, Tiny-SPPCSPC, and C3-B-CBAM
+
+# Parameters
+nc: 1 # number of classes
+scales: # model compound scaling constants
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+# YOLO-FMS Backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,  [64, 3, 2]]                 # 0-P1/2
+  - [-1, 1, Conv,  [128, 3, 2]]                # 1-P2/4
+  - [-1, 3, C3,    [128]]                       # 2
+  - [-1, 1, Conv,  [256, 3, 2]]                 # 3-P3/8
+  - [-1, 6, C3,    [256]]                       # 4
+  - [-1, 1, Conv,  [512, 3, 2]]                 # 5-P4/16
+  - [-1, 6, C3,    [512]]                       # 6
+  - [-1, 1, Conv,  [1024, 3, 2]]                # 7-P5/32
+  - [-1, 3, C3CBAM, [1024]]                    # 8 C3-B-CBAM at end of backbone
+  - [-1, 1, TinySPPCSPC2, [1024]]               # 9 Tiny-SPPCSPC2 (enhanced SPPCSPC)
+
+# YOLO-FMS Head (Neck + Head with GSConv replacing all ordinary convolutions)
+head:
+  # Top-down path (FPN)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 10
+  - [[-1, 6], 1, Concat, [1]]                  # 11 cat backbone P4
+  - [-1, 3, C3CBAM, [512]]                     # 12 C3-B-CBAM at end of feature extraction
+  
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 13
+  - [[-1, 4], 1, Concat, [1]]                  # 14 cat backbone P3
+  - [-1, 3, C3CBAM, [256]]                     # 15
+  
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 16
+  - [[-1, 1], 1, Concat, [1]]                  # 17 cat backbone P2
+  - [-1, 3, C3CBAM, [128]]                     # 18
+  
+  # Small object detection head (160x160) - upsampling to create 160x160 feature map
+  # Merge with output from third layer of backbone (layer 1, P2/4)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 19 upsample for small object detection
+  - [[-1, 1], 1, Concat, [1]]                  # 20 cat with P2/4 (layer 1)
+  - [-1, 1, GSConv, [128, 1, 1]]               # 21 channel adjustment to 128
+  - [-1, 3, C3CBAM, [128]]                     # 22 P1/2 small object head (160x160)
+  
+  # Bottom-up path (PAN) with GSConv
+  - [-1, 1, GSConv, [128, 3, 2]]               # 23 downsample
+  - [[-1, 18], 1, Concat, [1]]                 # 24 cat with P2 head
+  - [-1, 3, C3CBAM, [256]]                     # 25 P2/4 (80x80)
+  
+  - [-1, 1, GSConv, [256, 3, 2]]               # 26 downsample
+  - [[-1, 15], 1, Concat, [1]]                 # 27 cat with P3 head
+  - [-1, 3, C3CBAM, [512]]                     # 28 P3/8 (40x40)
+  
+  - [-1, 1, GSConv, [512, 3, 2]]               # 29 downsample
+  - [[-1, 12], 1, Concat, [1]]                 # 30 cat with P4 head
+  - [-1, 3, C3CBAM, [1024]]                    # 31 P4/16 (20x20)
+  
+  # Detection layers: P1/2 (160x160), P2/4 (80x80), P3/8 (40x40), P4/16 (20x20)
+  - [[22, 25, 28, 31], 1, Detect, [nc]]        # 32 Detect(P1/2, P2/4, P3/8, P4/16)
+
