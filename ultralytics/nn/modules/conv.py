@@ -22,6 +22,7 @@ __all__ = (
     "Concat",
     "RepConv",
     "Index",
+    "SPDConv",
 )
 
 
@@ -348,3 +349,47 @@ class Index(nn.Module):
         Expects a list of tensors as input.
         """
         return x[self.index]
+
+
+class SPDConv(nn.Module):
+    """
+    Spatial-to-Depth Convolution (SPDConv) for downsampling.
+    
+    Preserves spatial information during downsampling by converting spatial dimensions
+    to depth (channels). Better for small object detection compared to standard Conv downsampling.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride (default: 2, must be 2 for proper downsampling)
+        p (int): Padding (auto-calculated if None)
+        g (int): Groups (default: 1)
+        act (bool): Activation (default: True)
+    """
+
+    def __init__(self, c1, c2, k=3, s=2, p=None, g=1, act=True):
+        """Initialize SPDConv module for spatial-to-depth downsampling."""
+        super().__init__()
+        if s != 2:
+            raise ValueError(f"SPDConv stride must be 2, got {s}")
+        
+        # SPDConv: Split spatial -> concatenate to channels -> conv
+        # Input: [B, C, H, W] -> Split into 4 parts -> [B, C*4, H/2, W/2] -> Conv to c2
+        self.conv = Conv(c1 * 4, c2, k, 1, autopad(k, p), g, act=act)
+        self.s = s
+
+    def forward(self, x):
+        """
+        Forward pass: Split spatial dimensions into 4 parts and concatenate to channels.
+        
+        Input: [B, C, H, W]
+        Output: [B, C2, H/2, W/2]
+        """
+        # Split spatial dimension into 4 parts (for stride=2 downsampling)
+        # Equivalent to: top-left, top-right, bottom-left, bottom-right
+        x = torch.cat(
+            [x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1
+        )
+        # Apply convolution (stride=1, spatial size already reduced by split)
+        return self.conv(x)
