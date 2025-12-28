@@ -1462,8 +1462,11 @@ class RFB(nn.Module):
     def __init__(self, c1, c2, scale=0.25):
         """Initialize RFB module."""
         super().__init__()
-        # Calculate hidden channels - ensure reasonable size
-        c_ = max(8, min(int(c2 * scale), c2 // 4))
+        # Calculate hidden channels - ensure reasonable size and divisible
+        c_ = max(8, min(int(c2 * scale), c2 // 5))
+        # Make sure 5*c_ is reasonable (not larger than c2*2)
+        while 5 * c_ > c2 * 2 and c_ > 8:
+            c_ = max(8, c_ - 1)
         
         # 1x1 conv branch
         self.branch1 = Conv(c1, c_, 1, 1)
@@ -1558,7 +1561,12 @@ class MSFF(nn.Module):
     def __init__(self, c1, c2, scales=[3, 5], e=0.5):
         """Initialize MSFF module."""
         super().__init__()
-        c_ = max(8, int(c2 * e))  # hidden channels, ensure at least 8 for stability
+        # Calculate hidden channels
+        num_branches = len(scales) + 1
+        c_ = max(8, int(c2 * e))
+        # Ensure c_ * num_branches is not too large
+        while c_ * num_branches > c2 * 3 and c_ > 8:
+            c_ = max(8, c_ - 1)
         
         # Multi-scale branches
         self.branches = nn.ModuleList()
@@ -1570,7 +1578,6 @@ class MSFF(nn.Module):
         self.branch_1x1 = Conv(c1, c_, 1, 1)
         
         # Adaptive fusion weights (learnable)
-        num_branches = len(scales) + 1
         self.fusion_weights = nn.Parameter(torch.ones(num_branches) / num_branches)
         
         # Channel attention
