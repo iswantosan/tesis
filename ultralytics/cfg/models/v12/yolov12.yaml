@@ -43,7 +43,7 @@ head:
   - [-1, 2, A2C2f, [128, False, -1]]                    # 18 P2_td - Area attention for fine details
 
   # ===== P2 OUTPUT =====
-  - [-1, 1, RFB, [128, 0.5]]                            # 19 - RFB for enhanced receptive field
+  - [-1, 1, RFB, [128, 128]]                            # 19 - RFB for enhanced receptive field
   - [-1, 1, ChannelAttention, [128]]                    # 20
   - [-1, 1, SpatialAttention, [7]]                      # 21
   - [-1, 1, Conv, [128, 1, 1]]                          # 22 P2_out
