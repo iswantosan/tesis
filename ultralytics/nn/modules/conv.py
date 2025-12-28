@@ -554,6 +554,9 @@ class GSConv(nn.Module):
         """Initialize GSConv layer."""
         super().__init__()
         # Split output channels: half for SC, half for DSC
+        # Ensure c_ is at least 1 and c2 is even for proper splitting
+        if c2 < 2:
+            raise ValueError(f"GSConv requires c2 >= 2, got {c2}")
         c_ = c2 // 2
         
         # Standard convolution (SC)

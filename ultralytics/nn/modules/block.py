@@ -1462,7 +1462,7 @@ class RFB(nn.Module):
     def __init__(self, c1, c2, scale=0.25):
         """Initialize RFB module."""
         super().__init__()
-        c_ = int(c2 * scale)  # hidden channels
+        c_ = max(8, int(c2 * scale))  # hidden channels, ensure at least 8 for stability
         
         # 1x1 conv branch
         self.branch1 = Conv(c1, c_, 1, 1)
@@ -1556,7 +1556,7 @@ class MSFF(nn.Module):
     def __init__(self, c1, c2, scales=[3, 5], e=0.5):
         """Initialize MSFF module."""
         super().__init__()
-        c_ = int(c2 * e)  # hidden channels
+        c_ = max(8, int(c2 * e))  # hidden channels, ensure at least 8 for stability
         
         # Multi-scale branches
         self.branches = nn.ModuleList()
