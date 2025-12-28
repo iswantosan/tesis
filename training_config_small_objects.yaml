@@ -1,0 +1,85 @@
+# Recommended Training Settings for YOLOv12 - Very Small Objects
+# Optimized for medical microscopy (e.g., Ziehl–Neelsen stain, bacilli detection)
+
+# ==================== BASIC SETTINGS ====================
+epochs: 200                    # More epochs for small objects
+imgsz: 1280                    # LARGER image size is CRITICAL for small objects (640 is too small)
+batch: 8                       # Adjust based on GPU memory (may need to reduce if OOM)
+optimizer: "SGD"               # SGD works well, or try AdamW with lower LR
+patience: 50                   # Allow more patience for convergence
+single_cls: true
+
+# ==================== LEARNING RATE ====================
+lr0: 0.01                      # Initial learning rate (SGD)
+# lr0: 0.001                   # If using AdamW, use this instead
+lrf: 0.1                       # Final learning rate factor
+warmup_epochs: 3               # Warmup to stabilize training
+warmup_momentum: 0.8           # Lower momentum during warmup
+warmup_bias_lr: 0.1            # Bias learning rate during warmup
+cos_lr: true                   # Cosine learning rate scheduler (better for long training)
+
+# ==================== OPTIMIZER SETTINGS ====================
+momentum: 0.937                # SGD momentum (good default)
+weight_decay: 0.0005           # Weight decay (L2 regularization)
+# weight_decay: 0.01           # If using AdamW (decoupled weight decay)
+
+# ==================== DATA AUGMENTATION (CRITICAL FOR SMALL OBJECTS) ====================
+# Rule: LESS is MORE for small objects - aggressive augmentation can destroy small object visibility
+
+# 1) Color/HSV (conservative - preserve stain colors)
+hsv_h: 0.010                   # Minimal hue shift (preserve Ziehl–Neelsen color)
+hsv_s: 0.15                    # Moderate saturation
+hsv_v: 0.15                    # Conservative brightness (objects can disappear if too dark/bright)
+
+# 2) Geometric (MINIMAL - small objects can disappear)
+scale: 0.15                    # ±7.5% scale (small objects need consistent size)
+translate: 0.05                # 2.5% translation (very conservative)
+degrees: 5.0                   # Max 5° rotation (small rotation acceptable)
+shear: 0.0                     # NO shear (can distort small objects)
+perspective: 0.0               # NO perspective (can distort small objects)
+
+# 3) Flip
+fliplr: 0.10                   # 10% horizontal flip (moderate)
+flipud: 0.0                    # NO vertical flip (can change distribution)
+
+# 4) Mosaic (CONSERVATIVE - can make small objects disappear)
+mosaic: 0.10                   # LOW mosaic (10% probability)
+close_mosaic: 30               # Turn off mosaic after 30 epochs (let model focus on real images)
+
+# 5) Mixing augmentations (CAREFUL with small objects)
+copy_paste: 0.0                # OFF - can create artifacts with small objects
+mixup: 0.0                     # OFF - small objects can get mixed/lost
+erasing: 0.0                   # OFF - can erase small objects
+
+# 6) Auto augment (disable to have manual control)
+auto_augment: null             # Disable auto augment (use manual settings above)
+
+# ==================== LOSS WEIGHTS ====================
+# Fine-tune for better localization of small objects
+box: 7.5                       # Box regression loss (higher = better localization)
+cls: 0.5                       # Classification loss
+dfl: 1.5                       # Distribution focal loss (helps with small objects)
+
+# ==================== REGULARIZATION ====================
+label_smoothing: 0.0           # No label smoothing (or 0.05 if needed)
+dropout: 0.0                   # Usually not needed
+
+# ==================== TRAINING OPTIONS ====================
+freeze: 0                      # Don't freeze (train all layers)
+cache: true                    # Cache images for faster training
+multi_scale: false             # Disable multi-scale (use fixed larger size instead)
+rect: false                    # Disable rectangular training (keep aspect ratio)
+workers: 8                     # Number of data loading workers
+close_mosaic: 30               # Turn off mosaic after 30 epochs
+
+# ==================== VALIDATION ====================
+val: true                      # Validate during training
+plots: true                    # Generate plots
+save_period: 10                # Save checkpoint every 10 epochs
+
+# ==================== ADVANCED (OPTIONAL) ====================
+# amp: true                    # Automatic Mixed Precision (faster, less memory)
+# overlap_mask: true           # For segmentation tasks
+# mask_ratio: 4                # Mask downsampling ratio
+
+

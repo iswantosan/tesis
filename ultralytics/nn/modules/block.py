@@ -53,6 +53,10 @@ __all__ = (
     "SCDown",
     "TorchVision",
     "BConcat",
+    "RFB",
+    "C2fRFB",
+    "MSFF",
+    "C2fMSFF",
 )
 
 
@@ -1431,3 +1435,190 @@ class BConcat(nn.Module):
         
         # Final conv 1x1
         return self.cv_out(out)
+
+
+class RFB(nn.Module):
+    """
+    Receptive Field Block (RFB) for small object detection.
+    
+    RFB module uses multi-scale dilated convolutions to expand receptive field
+    without losing resolution, which is crucial for detecting small objects.
+    
+    Reference: "Receptive Field Block Net for Accurate and Fast Object Detection"
+    (https://arxiv.org/abs/1711.07767)
+    
+    Structure:
+    - 1x1 conv branch
+    - Three branches with different dilated rates (1, 2, 3)
+    - Global pooling branch
+    - Concat all branches and fuse with 1x1 conv
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        scale (float): Scale factor for hidden channels (default: 0.25)
+    """
+    
+    def __init__(self, c1, c2, scale=0.25):
+        """Initialize RFB module."""
+        super().__init__()
+        c_ = int(c2 * scale)  # hidden channels
+        
+        # 1x1 conv branch
+        self.branch1 = Conv(c1, c_, 1, 1)
+        
+        # Three branches with different dilated rates
+        self.branch2_1 = Conv(c1, c_, 1, 1)
+        self.branch2_2 = Conv(c_, c_, 3, 1, d=1)  # dilation=1
+        
+        self.branch3_1 = Conv(c1, c_, 1, 1)
+        self.branch3_2 = Conv(c_, c_, 3, 1, d=2)  # dilation=2
+        
+        self.branch4_1 = Conv(c1, c_, 1, 1)
+        self.branch4_2 = Conv(c_, c_, 3, 1, d=3)  # dilation=3
+        
+        # Global pooling branch
+        self.branch5 = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            Conv(c1, c_, 1, 1)
+        )
+        
+        # Output fusion
+        self.conv_out = Conv(5 * c_, c2, 1, 1)
+    
+    def forward(self, x):
+        """Forward pass through RFB module."""
+        # Branch 1: 1x1 conv
+        b1 = self.branch1(x)
+        
+        # Branch 2: 1x1 -> 3x3 (dilation=1)
+        b2 = self.branch2_1(x)
+        b2 = self.branch2_2(b2)
+        
+        # Branch 3: 1x1 -> 3x3 (dilation=2)
+        b3 = self.branch3_1(x)
+        b3 = self.branch3_2(b3)
+        
+        # Branch 4: 1x1 -> 3x3 (dilation=3)
+        b4 = self.branch4_1(x)
+        b4 = self.branch4_2(b4)
+        
+        # Branch 5: Global pooling
+        b5 = self.branch5(x)
+        b5 = F.interpolate(b5, size=x.shape[2:], mode='nearest')
+        
+        # Concat all branches and fuse
+        out = torch.cat([b1, b2, b3, b4, b5], dim=1)
+        return self.conv_out(out)
+
+
+class C2fRFB(C2f):
+    """
+    C2f module with RFB (Receptive Field Block) for enhanced small object detection.
+    
+    This module combines the C2f structure with RFB blocks to capture multi-scale
+    features effectively, improving detection performance for small objects.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of RFB blocks (default: 1)
+        e (float): Expansion ratio (default: 0.5)
+    """
+    
+    def __init__(self, c1, c2, n=1, e=0.5):
+        """Initialize C2fRFB module."""
+        super().__init__(c1, c2, n=n, e=e)
+        # Replace Bottleneck blocks with RFB blocks
+        self.m = nn.ModuleList(RFB(self.c, self.c, scale=0.5) for _ in range(n))
+
+
+class MSFF(nn.Module):
+    """
+    Multi-Scale Feature Fusion (MSFF) block for small object detection.
+    
+    MSFF fuses features at different scales using adaptive spatial fusion
+    mechanism. It's particularly effective for small objects by preserving
+    fine-grained details from multiple scales.
+    
+    Structure:
+    - Multi-scale feature extraction (3x3 convs with different receptive fields)
+    - Adaptive fusion with learnable weights
+    - Channel attention for feature refinement
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        scales (list): List of kernel sizes for multi-scale extraction (default: [3, 5])
+        e (float): Expansion ratio (default: 0.5)
+    """
+    
+    def __init__(self, c1, c2, scales=[3, 5], e=0.5):
+        """Initialize MSFF module."""
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        
+        # Multi-scale branches
+        self.branches = nn.ModuleList()
+        for k in scales:
+            padding = k // 2
+            self.branches.append(Conv(c1, c_, k, 1, p=padding))
+        
+        # 1x1 branch for fine details
+        self.branch_1x1 = Conv(c1, c_, 1, 1)
+        
+        # Adaptive fusion weights (learnable)
+        num_branches = len(scales) + 1
+        self.fusion_weights = nn.Parameter(torch.ones(num_branches) / num_branches)
+        
+        # Channel attention
+        from .conv import ChannelAttention
+        self.attention = ChannelAttention(c_ * num_branches)
+        
+        # Output projection
+        self.conv_out = Conv(c_ * num_branches, c2, 1, 1)
+    
+    def forward(self, x):
+        """Forward pass through MSFF module."""
+        # Extract multi-scale features
+        branch_outputs = []
+        for branch in self.branches:
+            branch_outputs.append(branch(x))
+        branch_outputs.append(self.branch_1x1(x))
+        
+        # Apply learnable fusion weights
+        weights = F.softmax(self.fusion_weights, dim=0)
+        fused = sum(w * b for w, b in zip(weights, branch_outputs))
+        
+        # For full feature fusion, we concat all branches
+        # This provides richer representation
+        all_branches = torch.cat(branch_outputs, dim=1)
+        
+        # Apply channel attention
+        attended = self.attention(all_branches)
+        
+        # Output projection
+        return self.conv_out(attended)
+
+
+class C2fMSFF(C2f):
+    """
+    C2f module with MSFF (Multi-Scale Feature Fusion) blocks.
+    
+    Combines C2f structure with MSFF for multi-scale feature extraction
+    optimized for small object detection.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of MSFF blocks (default: 1)
+        e (float): Expansion ratio (default: 0.5)
+        scales (list): Scales for MSFF (default: [3, 5])
+    """
+    
+    def __init__(self, c1, c2, n=1, e=0.5, scales=[3, 5]):
+        """Initialize C2fMSFF module."""
+        super().__init__(c1, c2, n=n, e=e)
+        # Replace standard Bottleneck with MSFF blocks
+        # MSFF requires same input/output channels
+        self.m = nn.ModuleList(MSFF(self.c, self.c, scales=scales, e=1.0) for _ in range(n))

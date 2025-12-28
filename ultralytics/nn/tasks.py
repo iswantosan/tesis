@@ -71,6 +71,9 @@ from ultralytics.nn.modules import (
     v10Detect,
     A2C2f,
     BConcat,
+    TinySPPCSPC1,
+    TinySPPCSPC2,
+    C3CBAM,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1035,6 +1038,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ECA,
             CoordAtt,
             BConcat,
+            GSConv,
+            TinySPPCSPC1,
+            TinySPPCSPC2,
+            C3CBAM,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1106,6 +1113,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             # ChannelAttention(channels) - channels must match input
             input_channels = ch[f] if isinstance(f, int) else sum(ch[x] for x in f if isinstance(x, int))
             args = [input_channels]  # Override args to use actual input channels
+            c2 = input_channels  # Output channels = input channels
+        elif m is CBAM:
+            # CBAM(c1, kernel_size=7) - c1 must match input channels
+            input_channels = ch[f] if isinstance(f, int) else sum(ch[x] for x in f if isinstance(x, int))
+            # Use provided kernel_size if given, otherwise default to 7
+            kernel_size = args[1] if len(args) > 1 and len(args) > 0 else 7
+            args = [input_channels, kernel_size]  # Override args to use actual input channels
             c2 = input_channels  # Output channels = input channels
         else:
             c2 = ch[f]

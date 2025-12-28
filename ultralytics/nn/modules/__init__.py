@@ -59,6 +59,14 @@ from .block import (
     TorchVision,
     A2C2f,
     BConcat,
+    TinySPPCSPC1,
+    TinySPPCSPC2,
+    BottleneckCBAM,
+    C3CBAM,
+    RFB,
+    C2fRFB,
+    MSFF,
+    C2fMSFF,
 )
 from .conv import (
     CBAM,
@@ -78,6 +86,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
     SPDConv,
+    GSConv,
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
 from .transformer import (
@@ -167,7 +176,16 @@ __all__ = (
     "Index",
     "A2C2f",
     "BConcat",
+    "TinySPPCSPC1",
+    "TinySPPCSPC2",
+    "BottleneckCBAM",
+    "C3CBAM",
+    "RFB",
+    "C2fRFB",
+    "MSFF",
+    "C2fMSFF",
     "SPDConv",
+    "GSConv",
     "ECA",
     "CoordAtt",
 )

@@ -25,27 +25,44 @@ backbone:
   - [-1, 4, A2C2f, [512, True, 4]]
   - [-1, 1, Conv,  [1024, 3, 2]] # 7-P5/32
   - [-1, 4, A2C2f, [1024, True, 1]] # 8
+  - [-1, 1, SPPF, [1024, 5]] # 9 - Multi-scale features
 
-# YOLO12-turbo head
+# YOLO12-turbo head - Enhanced with RFB and MSFF for small object detection
 head:
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
-  - [-1, 1, BConcat, [512]] # 11
+  # ===== TOP-DOWN =====
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]          # 10 P5->P4
+  - [[-1, 6], 1, Concat, [1]]                           # 11 cat P4
+  - [-1, 2, C2fRFB, [512, 0.5]]                         # 12 P4_td - RFB for multi-scale receptive field
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 1, BConcat, [256]] # 14
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]          # 13 P4->P3
+  - [[-1, 4], 1, Concat, [1]]                           # 14 cat P3
+  - [-1, 2, C2fMSFF, [256, 0.5]]                        # 15 P3_td - MSFF for multi-scale fusion
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 1], 1, Concat, [1]] # cat backbone P2
-  - [-1, 1, BConcat, [128]] # 17
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]          # 16 P3->P2
+  - [[-1, 1], 1, Concat, [1]]                           # 17 cat P2
+  - [-1, 2, A2C2f, [128, False, -1]]                    # 18 P2_td - Area attention for fine details
 
-  - [-1, 1, Conv, [128, 3, 2]]
-  - [[-1, 14], 1, Concat, [1]] # cat head P3
-  - [-1, 1, BConcat, [256]] # 20
+  # ===== P2 OUTPUT =====
+  - [-1, 1, RFB, [128, 0.5]]                            # 19 - RFB for enhanced receptive field
+  - [-1, 1, ChannelAttention, [128]]                    # 20
+  - [-1, 1, SpatialAttention, [7]]                      # 21
+  - [-1, 1, Conv, [128, 1, 1]]                          # 22 P2_out
 
-  - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 11], 1, Concat, [1]] # cat head P4
-  - [-1, 1, BConcat, [512]] # 23
+  # ===== BOTTOM-UP P2 -> P3 =====
+  - [-1, 1, Conv, [128, 3, 2]]                          # 23 downsample
+  - [[-1, 15], 1, Concat, [1]]                          # 24 cat P3_td
+  - [-1, 2, C2fMSFF, [256, 0.5]]                        # 25 - MSFF for multi-scale refinement
+  - [-1, 1, ChannelAttention, [256]]                    # 26
+  - [-1, 1, SpatialAttention, [7]]                      # 27
+  - [-1, 1, Conv, [256, 1, 1]]                          # 28 P3_out
 
-  - [[17, 20, 23], 1, Detect, [nc]] # Detect(P2, P3, P4)
+  # ===== BOTTOM-UP P3 -> P4 =====
+  - [-1, 1, Conv, [256, 3, 2]]                          # 29 downsample
+  - [[-1, 12], 1, Concat, [1]]                          # 30 cat P4_td
+  - [-1, 2, C2fRFB, [512, 0.5]]                         # 31 - RFB for multi-scale features
+  - [-1, 1, ChannelAttention, [512]]                    # 32
+  - [-1, 1, SpatialAttention, [7]]                      # 33
+  - [-1, 1, Conv, [512, 1, 1]]                          # 34 P4_out
+
+  # ===== DETECT (SAFE RELATIVE INDEX) =====
+  - [[-13, -7, -1], 1, Detect, [nc]]                    # Detect(P2,P3,P4)
