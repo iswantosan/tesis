@@ -1,0 +1,64 @@
+# Training Configuration untuk Improve mAP
+# Copy settings ini ke training command atau buat custom config
+
+# Model & Data
+model: yolov12.yaml  # atau yolov12s.yaml untuk model lebih besar
+data: your_dataset.yaml
+epochs: 300  # Lebih banyak epochs = lebih baik
+patience: 50  # Early stopping
+batch: 16  # Naikkan ke 32/64 jika GPU memory cukup
+imgsz: 640  # Naikkan ke 832 atau 1024 untuk objek kecil
+
+# Optimizer & Learning Rate (PENTING!)
+optimizer: AdamW  # Biasanya lebih baik dari SGD
+lr0: 0.001  # Untuk dataset kecil, turunkan dari 0.01
+lrf: 0.1  # Final LR = lr0 * lrf (0.001 * 0.1 = 0.0001)
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.0
+
+# Loss Weights
+box: 7.5  # Box regression loss
+cls: 0.5  # Classification loss (naikkan ke 1.0 jika banyak false positives)
+dfl: 1.5  # Distribution Focal Loss
+
+# Data Augmentation (Sesuaikan dengan dataset!)
+hsv_h: 0.015  # Hue augmentation
+hsv_s: 0.5  # Saturation (turunkan jika warna penting)
+hsv_v: 0.4  # Value (brightness)
+degrees: 0.0  # Rotation (hati-hati untuk medical!)
+translate: 0.1  # Translation
+scale: 0.5  # Scale augmentation
+shear: 0.0  # Shear
+perspective: 0.0  # Perspective
+flipud: 0.0  # Flip up-down
+fliplr: 0.5  # Flip left-right
+mosaic: 1.0  # Mosaic augmentation (sangat efektif!)
+mixup: 0.1  # Mixup (hati-hati untuk medical)
+copy_paste: 0.0  # Copy-paste augmentation
+
+# Training Strategy
+close_mosaic: 10  # Disable mosaic di 10 epochs terakhir
+multi_scale: False  # Set True untuk multi-scale training (lebih lambat)
+cache: False  # Set True untuk faster training (butuh RAM lebih)
+amp: True  # Mixed precision training
+
+# Validation
+val: True
+save_json: False
+conf: 0.25  # Confidence threshold
+iou: 0.7  # IoU threshold untuk NMS
+max_det: 300
+
+# Other
+device: 0  # GPU device
+workers: 8
+project: runs/detect
+name: yolov12_improved
+exist_ok: True
+pretrained: True
+verbose: True
+
+
