@@ -31,8 +31,6 @@ __all__ = (
     "Bottleneck",
     "BottleneckCSP",
     "Proto",
-    "ECA",
-    "CoordAtt",
     "RepC3",
     "ResNetLayer",
     "RepNCSPELAN4",
@@ -52,7 +50,6 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
-    "BConcat",
 )
 
 
@@ -1370,64 +1367,3 @@ class A2C2f(nn.Module):
         if self.gamma is not None:
             return x + self.gamma.view(1, -1, 1, 1) * self.cv2(torch.cat(y, 1))
         return self.cv2(torch.cat(y, 1))
-
-
-class BConcat(nn.Module):
-    """
-    "b" concatenation block from Figure 3.
-    Consists of convolutions (3x3 and 1x1), batch normalization, ReLU activation.
-    The "+" means concatenation.
-    
-    Structure based on Figure 3:
-    - Input branches to multiple paths:
-      1. Left path: conv 1x1 → conv 3x3 → conv 3x3
-      2. Right path: conv 1x1
-      3. Skip connection: input (direct)
-      4. Intermediate skip: from first conv 3x3 (in left path)
-    - All paths concatenated
-    - Concatenation → conv 1x1 final → output
-    
-    Args:
-        c1 (int): Input channels
-        c2 (int): Output channels
-        e (float): Expansion ratio for hidden channels (default: 0.5)
-    """
-    
-    def __init__(self, c1, c2, e=0.5):
-        """Initialize BConcat block."""
-        super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        
-        # Left path: conv 1x1 → conv 3x3 → conv 3x3
-        self.cv_left_1x1 = Conv(c1, c_, 1, 1)  # conv 1x1 top-left
-        self.cv_left_3x3_1 = Conv(c_, c_, 3, 1)  # first conv 3x3
-        self.cv_left_3x3_2 = Conv(c_, c_, 3, 1)  # second conv 3x3
-        
-        # Right path: conv 1x1
-        self.cv_right_1x1 = Conv(c1, c_, 1, 1)  # conv 1x1 top-right
-        
-        # Input skip: conv 1x1 to match channel dimension
-        self.cv_skip = Conv(c1, c_, 1, 1)
-        
-        # Final output conv 1x1
-        # Total channels after concat: skip (c_) + intermediate (c_) + left path (c_) + right path (c_) = 4*c_
-        self.cv_out = Conv(4 * c_, c2, 1, 1)
-    
-    def forward(self, x):
-        """Forward pass through BConcat block."""
-        # Left path
-        left_1x1 = self.cv_left_1x1(x)
-        left_3x3_1 = self.cv_left_3x3_1(left_1x1)  # intermediate skip connection
-        left_3x3_2 = self.cv_left_3x3_2(left_3x3_1)
-        
-        # Right path
-        right_1x1 = self.cv_right_1x1(x)
-        
-        # Input skip connection
-        skip = self.cv_skip(x)
-        
-        # Concatenate: input skip + intermediate skip (from first 3x3) + left path output + right path output
-        out = torch.cat([skip, left_3x3_1, left_3x3_2, right_1x1], dim=1)
-        
-        # Final conv 1x1
-        return self.cv_out(out)
