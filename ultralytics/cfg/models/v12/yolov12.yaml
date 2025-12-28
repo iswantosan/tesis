@@ -1,9 +1,9 @@
 # YOLOv12 🚀, AGPL-3.0 license
-# YOLOv12 object detection model with P2-P4 outputs. For Usage examples see https://docs.ultralytics.com/tasks/detect
+# YOLOv12 object detection model with P3-P5 outputs. For Usage examples see https://docs.ultralytics.com/tasks/detect
 # CFG file for YOLOv12-turbo
 
 # Parameters
-nc: 1 # number of classes
+nc: 80 # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolov12n.yaml' will call yolov12.yaml with scale 'n'
   # [depth, width, max_channels]
   n: [0.50, 0.25, 1024] # summary: 497 layers, 2,553,904 parameters, 2,553,888 gradients, 6.2 GFLOPs
@@ -36,16 +36,12 @@ head:
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
   - [-1, 2, A2C2f, [256, False, -1]] # 14
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 1], 1, Concat, [1]] # cat backbone P2
-  - [-1, 2, A2C2f, [128, False, -1]] # 17
-
-  - [-1, 1, Conv, [128, 3, 2]]
-  - [[-1, 14], 1, Concat, [1]] # cat head P3
-  - [-1, 2, A2C2f, [256, False, -1]] # 20
-
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 11], 1, Concat, [1]] # cat head P4
-  - [-1, 2, C3k2, [512, False]] # 23
+  - [-1, 2, A2C2f, [512, False, -1]] # 17
 
-  - [[17, 20, 23], 1, Detect, [nc]] # Detect(P2, P3, P4)
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 8], 1, Concat, [1]] # cat head P5
+  - [-1, 2, C3k2, [1024, True]] # 20 (P5/32-large)
+
+  - [[14, 17, 20], 1, Detect, [nc]] # Detect(P3, P4, P5)

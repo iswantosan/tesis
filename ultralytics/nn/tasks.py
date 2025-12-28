@@ -33,22 +33,21 @@ from ultralytics.nn.modules import (
     C2fCIB,
     C2fPSA,
     C3Ghost,
+    CBAM,
+    ChannelAttention,
+    SpatialAttention,
     C3k2,
     C3x,
     CBFuse,
-    CBAM,
     CBLinear,
-    ChannelAttention,
     Classify,
     Concat,
     Conv,
     Conv2,
     ConvTranspose,
-    CoordAtt,
     Detect,
     DWConv,
     DWConvTranspose2d,
-    ECA,
     Focus,
     GhostBottleneck,
     GhostConv,
@@ -65,12 +64,10 @@ from ultralytics.nn.modules import (
     RTDETRDecoder,
     SCDown,
     Segment,
-    SPDConv,
     TorchVision,
     WorldDetect,
     v10Detect,
     A2C2f,
-    BConcat,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -962,33 +959,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
-        if "nn." in m:
-            m = getattr(torch.nn, m[3:])
-        else:
-            # Get module from globals, with fallback to ultralytics.nn.modules
-            if m in globals():
-                m = globals()[m]
-            else:
-                # Fallback: import from ultralytics.nn.modules dynamically
-                try:
-                    from ultralytics.nn import modules as ultralytics_modules
-                    m = getattr(ultralytics_modules, m)
-                except (AttributeError, ImportError):
-                    # Last resort: direct import
-                    import sys
-                    import importlib
-                    if "ultralytics.nn.modules" not in sys.modules:
-                        importlib.import_module("ultralytics.nn.modules")
-                    modules_dict = sys.modules["ultralytics.nn.modules"]
-                    # Try getattr first
-                    try:
-                        m = getattr(modules_dict, m)
-                    except AttributeError:
-                        # Fallback to __dict__
-                        if hasattr(modules_dict, '__dict__') and m in modules_dict.__dict__:
-                            m = modules_dict.__dict__[m]
-                        else:
-                            raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
+        m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -997,7 +968,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if m in {
             Classify,
             Conv,
-            Conv2,
             ConvTranspose,
             GhostConv,
             Bottleneck,
@@ -1027,14 +997,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3x,
             RepC3,
             PSA,
-            CBAM,
             SCDown,
             C2fCIB,
             A2C2f,
-            SPDConv,
-            ECA,
-            CoordAtt,
-            BConcat,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1102,11 +1067,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
-        elif m is ChannelAttention:
-            # ChannelAttention(channels) - channels must match input
-            input_channels = ch[f] if isinstance(f, int) else sum(ch[x] for x in f if isinstance(x, int))
-            args = [input_channels]  # Override args to use actual input channels
-            c2 = input_channels  # Output channels = input channels
         else:
             c2 = ch[f]
 

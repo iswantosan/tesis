@@ -22,9 +22,6 @@ __all__ = (
     "Concat",
     "RepConv",
     "Index",
-    "SPDConv",
-    "ECA",
-    "CoordAtt",
 )
 
 
@@ -323,92 +320,6 @@ class CBAM(nn.Module):
         return self.spatial_attention(self.channel_attention(x))
 
 
-class ECA(nn.Module):
-    """Efficient Channel Attention module.
-    
-    Reference: https://arxiv.org/abs/1910.03151
-    """
-    
-    def __init__(self, c1, c2=None, k_size=3):
-        """Initialize ECA module with input channels (c1) and optional output channels (c2)."""
-        super().__init__()
-        if c2 is None:
-            c2 = c1
-        self.c2 = c2
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-        if c1 != c2:
-            self.conv_proj = Conv(c1, c2, 1)
-        else:
-            self.conv_proj = nn.Identity()
-        
-    def forward(self, x):
-        """Apply ECA attention."""
-        identity = self.conv_proj(x)
-        y = self.avg_pool(x)
-        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
-        y = self.sigmoid(y)
-        return identity * y.expand_as(identity)
-
-
-class CoordAtt(nn.Module):
-    """Coordinate Attention module.
-    
-    Reference: https://arxiv.org/abs/2103.02907
-    """
-    
-    def __init__(self, c1, c2=None, reduction=32):
-        """Initialize Coordinate Attention module with input channels (c1) and optional output channels (c2)."""
-        super().__init__()
-        if c2 is None:
-            c2 = c1
-        self.c2 = c2
-        c_ = max(c1 // reduction, 8)
-        self.conv1 = Conv(c1, c_, 1)
-        self.bn1 = nn.BatchNorm2d(c_)
-        self.act = nn.ReLU(inplace=True)
-        
-        # Coordinate information embedding
-        self.conv_h = nn.Conv2d(c_, c_, kernel_size=(1, 3), padding=(0, 1))
-        self.conv_w = nn.Conv2d(c_, c_, kernel_size=(3, 1), padding=(1, 0))
-        
-        self.conv2 = Conv(c_, c2, 1)
-        self.sigmoid = nn.Sigmoid()
-        
-    def forward(self, x):
-        """Apply Coordinate Attention."""
-        identity = x
-        n, c, h, w = x.size()
-        
-        # Global pooling
-        x_h = nn.AdaptiveAvgPool2d((h, 1))(x)
-        x_w = nn.AdaptiveAvgPool2d((1, w))(x).permute(0, 1, 3, 2)
-        
-        # Concat and conv
-        y = torch.cat([x_h, x_w], dim=2)
-        y = self.conv1(y)
-        y = self.bn1(y)
-        y = self.act(y)
-        
-        # Split
-        x_h, x_w = torch.split(y, [h, w], dim=2)
-        x_w = x_w.permute(0, 1, 3, 2)
-        
-        # Conv
-        x_h = self.sigmoid(self.conv_h(x_h))
-        x_w = self.sigmoid(self.conv_w(x_w))
-        
-        # Expand and multiply
-        x_h = x_h.expand(-1, -1, h, w)
-        x_w = x_w.expand(-1, -1, h, w)
-        
-        y = identity * x_h * x_w
-        if self.c2 != c1:
-            y = self.conv2(y)
-        return y
-
-
 class Concat(nn.Module):
     """Concatenate a list of tensors along dimension."""
 
@@ -437,70 +348,3 @@ class Index(nn.Module):
         Expects a list of tensors as input.
         """
         return x[self.index]
-
-
-class SPDConv(nn.Module):
-    """
-    Spatial to Depth Convolution (SPD-Conv).
-    
-    Replaces strided convolution with a Space-to-Depth transformation followed by a non-strided convolution.
-    Reference: https://arxiv.org/abs/2208.03641
-    
-    Args:
-        c1: Input channels
-        c2: Output channels
-        k: Kernel size (default: 1)
-        s: Stride (default: 1, typically 2 for downsampling)
-        p: Padding (default: None, auto-calculated)
-        g: Groups (default: 1)
-        d: Dilation (default: 1)
-        act: Activation function (default: True, uses SiLU)
-    """
-
-    default_act = nn.SiLU()  # default activation
-
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
-        """Initialize SPDConv layer."""
-        super().__init__()
-        self.conv = None
-        self.s = s  # stride
-        
-        if s == 1:
-            # For stride 1, just use regular convolution
-            self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
-        else:
-            # For stride > 1, use Space-to-Depth transformation
-            # Space-to-Depth increases channels by s^2, so we need to adjust input channels
-            self.conv = nn.Conv2d(c1 * s * s, c2, k, 1, autopad(k, p, d), groups=g, dilation=d, bias=False)
-        
-        self.bn = nn.BatchNorm2d(c2)
-        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
-
-    def forward(self, x):
-        """Apply SPD-Conv transformation."""
-        if self.s == 1:
-            return self.act(self.bn(self.conv(x)))
-        
-        # Space-to-Depth transformation (inverse of pixel shuffle)
-        # For stride s, convert sxs spatial blocks to s^2 channels
-        B, C, H, W = x.shape
-        # Split into sxs blocks
-        x = x.view(B, C, H // self.s, self.s, W // self.s, self.s)
-        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()  # B, C, s, s, H//s, W//s
-        x = x.view(B, C * self.s * self.s, H // self.s, W // self.s)  # B, C*s*s, H//s, W//s
-        
-        # Apply non-strided convolution
-        return self.act(self.bn(self.conv(x)))
-
-    def forward_fuse(self, x):
-        """Apply convolution and activation without batch normalization."""
-        if self.s == 1:
-            return self.act(self.conv(x))
-        
-        # Space-to-Depth transformation
-        B, C, H, W = x.shape
-        x = x.view(B, C, H // self.s, self.s, W // self.s, self.s)
-        x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
-        x = x.view(B, C * self.s * self.s, H // self.s, W // self.s)
-        
-        return self.act(self.conv(x))
