@@ -968,11 +968,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             try:
                 m = globals()[m]
             except KeyError:
-                from ultralytics.nn.modules import __all__
-                if m in __all__:
-                    m = getattr(__import__("ultralytics.nn.modules", fromlist=[m]), m)
-                else:
-                    raise KeyError(f"Module '{m}' not found in globals() or ultralytics.nn.modules")
+                # Fallback: import directly from ultralytics.nn.modules
+                from ultralytics.nn import modules as nn_modules
+                m = getattr(nn_modules, m)
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
