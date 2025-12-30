@@ -59,6 +59,8 @@ from .block import (
     TorchVision,
     A2C2f,
     SmallObjectBlock,
+    RFCBAM,
+    DySample,
 )
 from .conv import (
     CBAM,
@@ -164,5 +166,7 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
-    "SmallObjectBlock"
+    "SmallObjectBlock",
+    "RFCBAM",
+    "DySample"
 )

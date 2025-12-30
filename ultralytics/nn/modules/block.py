@@ -51,6 +51,8 @@ __all__ = (
     "SCDown",
     "TorchVision",
     "SmallObjectBlock",
+    "RFCBAM",
+    "DySample",
 )
 
 
@@ -1462,3 +1464,150 @@ class SmallObjectBlock(nn.Module):
             x = x + identity
         
         return x
+
+
+class RFCBAM(nn.Module):
+    """
+    Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.
+    
+    RFCBAM uses receptive field attention mechanisms to perform downsampling operations.
+    Unlike conventional convolution, RFCBAM focuses on local receptive field characteristics
+    and uses attention to evaluate the significance of each feature point, mitigating
+    information dilution caused by parameter sharing.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride (1 for same size, 2 for downsampling)
+        g (int): Groups for group convolution (default: None, auto-calculate)
+    """
+    
+    def __init__(self, c1, c2, k=3, s=1, g=None):
+        """Initialize RFCBAM module for receptive field attention-based convolution."""
+        super().__init__()
+        from .conv import Conv, ChannelAttention, SpatialAttention
+        
+        self.stride = s
+        if g is None:
+            g = max(1, c1 // 4)  # Group convolution dengan reasonable groups
+        
+        # Stage 1: 3x3 group convolution untuk extract receptive field features
+        self.group_conv = nn.Conv2d(c1, c1, k, s, k//2, groups=g, bias=False)
+        self.group_bn = nn.BatchNorm2d(c1)
+        
+        # Dimensional transformation: expand receptive field features by factor of 3x3 = 9
+        # Each spatial location gets expanded to 9 features (3x3 receptive field)
+        self.expand_conv = Conv(c1, c1 * 9, k=1, s=1)
+        
+        # Spatial attention dengan mean pooling dan max pooling
+        self.spatial_attn = SpatialAttention(kernel_size=7)
+        
+        # Channel attention dengan SE (Squeeze-and-Excitation)
+        self.channel_attn = ChannelAttention(c1)
+        
+        # Final 3x3 convolution untuk resize
+        # Jika stride=1, final stride=3 untuk maintain size; jika stride=2, final stride=2 untuk downsampling
+        final_stride = 3 if s == 1 else s
+        self.final_conv = Conv(c1, c2, k=3, s=final_stride, p=1)
+        
+    def forward(self, x):
+        """
+        Forward pass through RFCBAM module.
+        
+        Process:
+        1. Group convolution untuk extract receptive field features
+        2. Dimensional transformation (expand receptive field by 3x3)
+        3. Spatial attention (mean + max pooling)
+        4. Channel attention (SE)
+        5. Fuse attention dengan element-wise multiplication
+        6. Final convolution untuk resize
+        """
+        # Stage 1: Group convolution untuk extract receptive field features
+        x = self.group_conv(x)
+        x = self.group_bn(x)
+        x = F.relu(x)
+        
+        # Dimensional transformation: expand receptive field by 3x3
+        B, C, H, W = x.shape
+        x_expanded = self.expand_conv(x)  # [B, C*9, H, W]
+        
+        # Reshape untuk create expanded receptive field feature map
+        # Split into 9 parts (representing 3x3 receptive field positions)
+        x_expanded = x_expanded.view(B, C, 9, H, W)
+        
+        # Aggregate expanded features (simplified: use mean, full impl would rearrange spatially)
+        x_expanded = x_expanded.mean(dim=2)  # [B, C, H, W]
+        
+        # Spatial attention dengan mean pooling dan max pooling
+        x_spatial = self.spatial_attn(x_expanded)
+        
+        # Channel attention dengan SE (Squeeze-and-Excitation)
+        x_channel = self.channel_attn(x_expanded)
+        
+        # Fuse attention dengan element-wise multiplication
+        x = x_spatial * x_channel
+        
+        # Final 3x3 convolution untuk resize
+        x = self.final_conv(x)
+        
+        return x
+
+
+class DySample(nn.Module):
+    """
+    Dynamic Upsampling Module (DySample) for SOD-YOLO.
+    
+    DySample adaptively generates upsampling coordinates based on input feature map content.
+    Unlike traditional upsampling with fixed interpolation rules, DySample generates
+    a distribution of sampling points based on input feature content.
+    
+    Args:
+        channels (int): Input channels (untuk generate offset)
+        scale_factor (int): Upsampling scale factor (default: 2)
+    """
+    
+    def __init__(self, channels, scale_factor=2):
+        """Initialize DySample module for dynamic upsampling."""
+        super().__init__()
+        self.scale_factor = scale_factor
+        
+        # Linear layer untuk transform feature map dan generate offset
+        self.offset_conv = nn.Conv2d(channels, 2, 1, 1, 0, bias=True)
+        nn.init.constant_(self.offset_conv.weight, 0)
+        nn.init.constant_(self.offset_conv.bias, 0)
+        
+    def forward(self, x):
+        """
+        Forward pass through DySample module.
+        
+        Process:
+        1. Generate offset map dari input feature
+        2. Create base grid coordinates
+        3. Add offset to grid untuk dynamic sampling
+        4. Grid sampling berdasarkan calculated coordinates
+        """
+        B, C, H, W = x.shape
+        
+        # Generate offset map dari input feature
+        offset = self.offset_conv(x)  # [B, 2, H, W]
+        offset = offset * 0.1  # Scale offset untuk stability
+        
+        # Create base grid coordinates [-1, 1]
+        grid_h = torch.linspace(-1, 1, H * self.scale_factor, device=x.device, dtype=x.dtype)
+        grid_w = torch.linspace(-1, 1, W * self.scale_factor, device=x.device, dtype=x.dtype)
+        grid_y, grid_x = torch.meshgrid(grid_h, grid_w, indexing='ij')
+        grid = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)  # [B, 2, H*scale, W*scale]
+        
+        # Upsample offset to target size
+        offset_upsampled = F.interpolate(offset, size=(H * self.scale_factor, W * self.scale_factor), 
+                                         mode='bilinear', align_corners=False)
+        
+        # Add offset to grid untuk dynamic sampling coordinates
+        grid = grid + offset_upsampled
+        
+        # Grid sampling berdasarkan calculated coordinates
+        grid = grid.permute(0, 2, 3, 1)  # [B, H*scale, W*scale, 2]
+        x_upsampled = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        
+        return x_upsampled
