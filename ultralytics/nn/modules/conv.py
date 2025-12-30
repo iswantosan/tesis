@@ -23,6 +23,7 @@ __all__ = (
     "RepConv",
     "Index",
     "SPDConv",
+    "SmallObjectBlock"
 )
 
 
