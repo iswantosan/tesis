@@ -1372,34 +1372,107 @@ class A2C2f(nn.Module):
 
 class SmallObjectBlock(nn.Module):
     """
-    Small Object Detection Block optimized for BTA/AFB detection.
+    Advanced Small Object Detection Block optimized for BTA/AFB detection.
     
-    Combines CBAM attention, multi-scale feature enhancement, and spatial preservation
-    for better small object detection performance.
+    Implements multi-scale feature enhancement, context-aware attention, and 
+    residual connections specifically designed for very small object detection.
+    
+    Features:
+    - Multi-scale feature extraction (1x1, 3x3, 5x5 convolutions)
+    - Enhanced CBAM with residual connection
+    - Feature fusion with learnable weights
+    - Spatial detail preservation
     
     Args:
         c1 (int): Input channels (auto-inferred from previous layer)
         c2 (int): Output channels
         kernel_size (int): Kernel size for spatial attention (default: 7)
+        use_residual (bool): Whether to use residual connection (default: True)
     """
     
-    def __init__(self, c1, c2, kernel_size=7):
+    def __init__(self, c1, c2, kernel_size=7, use_residual=True):
         """Initialize SmallObjectBlock for enhanced small object detection."""
         super().__init__()
-        from .conv import CBAM, Conv
+        from .conv import CBAM, Conv, ChannelAttention, SpatialAttention
         
-        # Feature enhancement with 3x3 conv
-        self.conv1 = Conv(c1, c2, k=3, s=1, p=1)
+        self.use_residual = use_residual and (c1 == c2)
         
-        # CBAM attention for channel and spatial focus
-        self.cbam = CBAM(c2, kernel_size)
+        # Multi-scale feature extraction untuk capture berbagai ukuran small objects
+        # 1x1 conv untuk global context
+        self.conv1x1 = Conv(c1, c2 // 4, k=1, s=1)
         
-        # Additional feature refinement
-        self.conv2 = Conv(c2, c2, k=1, s=1)
+        # 3x3 conv untuk local features (standard)
+        self.conv3x3 = Conv(c1, c2 // 2, k=3, s=1, p=1)
+        
+        # 5x5 conv untuk larger receptive field (untuk context)
+        self.conv5x5 = Conv(c1, c2 // 4, k=5, s=1, p=2)
+        
+        # Context pooling untuk global context tanpa mengurangi spatial resolution
+        # Adaptive pooling untuk context aggregation (tidak mengurangi detail)
+        self.global_pool = nn.AdaptiveAvgPool2d(1)  # Global context
+        self.context_conv = Conv(c1, c2 // 4, k=1, s=1)  # Context feature
+        
+        # Feature fusion dengan learnable weights (4 branches sekarang: 1x1, 3x3, 5x5, context)
+        self.fusion_conv = Conv(c2, c2, k=1, s=1)
+        
+        # Enhanced attention mechanism
+        self.channel_attn = ChannelAttention(c2)
+        self.spatial_attn = SpatialAttention(kernel_size)
+        
+        # Feature refinement
+        self.refine_conv = Conv(c2, c2, k=3, s=1, p=1)
+        
+        # Learnable fusion weight untuk 4 branches
+        self.fusion_weight = nn.Parameter(torch.ones(4) / 4)
         
     def forward(self, x):
-        """Forward pass through small object detection block."""
-        x = self.conv1(x)
-        x = self.cbam(x)  # Apply attention
-        x = self.conv2(x)  # Final refinement
+        """
+        Forward pass through small object detection block.
+        
+        Process:
+        1. Multi-scale feature extraction
+        2. Context pooling untuk global context
+        3. Feature fusion with learnable weights
+        4. Enhanced attention (channel + spatial)
+        5. Feature refinement
+        6. Residual connection (if applicable)
+        """
+        identity = x
+        
+        # Multi-scale feature extraction
+        feat1x1 = self.conv1x1(x)  # Point-wise features
+        feat3x3 = self.conv3x3(x)  # Local features
+        feat5x5 = self.conv5x5(x)  # Larger context
+        
+        # Context pooling: Global context tanpa mengurangi spatial resolution
+        # Pool ke 1x1, lalu upsample kembali ke original size
+        B, C, H, W = x.shape
+        global_context = self.global_pool(x)  # [B, C, 1, 1]
+        global_context = self.context_conv(global_context)  # [B, c2//4, 1, 1]
+        global_context = F.interpolate(global_context, size=(H, W), mode='nearest')  # [B, c2//4, H, W]
+        
+        # Weighted fusion of multi-scale features + context
+        # Normalize weights
+        weights = torch.softmax(self.fusion_weight, dim=0)
+        fused = torch.cat([
+            feat1x1 * weights[0],
+            feat3x3 * weights[1],
+            feat5x5 * weights[2],
+            global_context * weights[3]  # Global context
+        ], dim=1)
+        
+        # Feature fusion
+        x = self.fusion_conv(fused)
+        
+        # Enhanced attention mechanism (channel first, then spatial)
+        x = self.channel_attn(x)  # Channel attention
+        x = self.spatial_attn(x)  # Spatial attention
+        
+        # Feature refinement
+        x = self.refine_conv(x)
+        
+        # Residual connection (preserve original features untuk small objects)
+        if self.use_residual:
+            x = x + identity
+        
         return x
