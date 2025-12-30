@@ -1445,21 +1445,33 @@ class SmallObjectBlock(nn.Module):
         feat5x5 = self.conv5x5(x)  # Larger context
         
         # Context pooling: Global context tanpa mengurangi spatial resolution
-        # Pool ke 1x1, lalu upsample kembali ke original size
+        # Skip context pooling jika spatial size terlalu kecil (untuk menghindari BatchNorm error)
         B, C, H, W = x.shape
-        global_context = self.global_pool(x)  # [B, C, 1, 1]
-        global_context = self.context_conv(global_context)  # [B, c2//4, 1, 1]
-        global_context = F.interpolate(global_context, size=(H, W), mode='nearest')  # [B, c2//4, H, W]
+        min_spatial_size = min(H, W)
         
-        # Weighted fusion of multi-scale features + context
-        # Normalize weights
-        weights = torch.softmax(self.fusion_weight, dim=0)
-        fused = torch.cat([
-            feat1x1 * weights[0],
-            feat3x3 * weights[1],
-            feat5x5 * weights[2],
-            global_context * weights[3]  # Global context
-        ], dim=1)
+        if min_spatial_size > 1:
+            # Context pooling hanya jika spatial size > 1
+            global_context = self.global_pool(x)  # [B, C, 1, 1]
+            global_context = self.context_conv(global_context)  # [B, c2//4, 1, 1]
+            global_context = F.interpolate(global_context, size=(H, W), mode='nearest')  # [B, c2//4, H, W]
+            
+            # Weighted fusion dengan 4 branches (termasuk context)
+            weights = torch.softmax(self.fusion_weight, dim=0)
+            fused = torch.cat([
+                feat1x1 * weights[0],
+                feat3x3 * weights[1],
+                feat5x5 * weights[2],
+                global_context * weights[3]  # Global context
+            ], dim=1)
+        else:
+            # Fallback: skip context pooling, hanya gunakan 3 branches
+            # Re-normalize weights untuk 3 branches saja
+            weights_3 = torch.softmax(self.fusion_weight[:3], dim=0)
+            fused = torch.cat([
+                feat1x1 * weights_3[0],
+                feat3x3 * weights_3[1],
+                feat5x5 * weights_3[2]
+            ], dim=1)
         
         # Feature fusion
         x = self.fusion_conv(fused)
