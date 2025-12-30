@@ -58,6 +58,7 @@ from .block import (
     SCDown,
     TorchVision,
     A2C2f,
+    SmallObjectBlock,
 )
 from .conv import (
     CBAM,
@@ -163,5 +164,5 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
-    "SPDConv",
+    "SmallObjectBlock"
 )

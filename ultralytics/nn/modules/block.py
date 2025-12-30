@@ -50,6 +50,7 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "SmallObjectBlock",
 )
 
 
@@ -1367,3 +1368,38 @@ class A2C2f(nn.Module):
         if self.gamma is not None:
             return x + self.gamma.view(1, -1, 1, 1) * self.cv2(torch.cat(y, 1))
         return self.cv2(torch.cat(y, 1))
+
+
+class SmallObjectBlock(nn.Module):
+    """
+    Small Object Detection Block optimized for BTA/AFB detection.
+    
+    Combines CBAM attention, multi-scale feature enhancement, and spatial preservation
+    for better small object detection performance.
+    
+    Args:
+        c1 (int): Input channels (auto-inferred from previous layer)
+        c2 (int): Output channels
+        kernel_size (int): Kernel size for spatial attention (default: 7)
+    """
+    
+    def __init__(self, c1, c2, kernel_size=7):
+        """Initialize SmallObjectBlock for enhanced small object detection."""
+        super().__init__()
+        from .conv import CBAM, Conv
+        
+        # Feature enhancement with 3x3 conv
+        self.conv1 = Conv(c1, c2, k=3, s=1, p=1)
+        
+        # CBAM attention for channel and spatial focus
+        self.cbam = CBAM(c2, kernel_size)
+        
+        # Additional feature refinement
+        self.conv2 = Conv(c2, c2, k=1, s=1)
+        
+    def forward(self, x):
+        """Forward pass through small object detection block."""
+        x = self.conv1(x)
+        x = self.cbam(x)  # Apply attention
+        x = self.conv2(x)  # Final refinement
+        return x
