@@ -1498,7 +1498,8 @@ class RFCBAM(nn.Module):
         
         # Dimensional transformation: expand receptive field features by factor of 3x3 = 9
         # Each spatial location gets expanded to 9 features (3x3 receptive field)
-        self.expand_conv = Conv(c1, c1 * 9, k=1, s=1)
+        # Use simple conv without BN untuk avoid BatchNorm error pada small feature maps
+        self.expand_conv = nn.Conv2d(c1, c1 * 9, k=1, s=1, bias=True)
         
         # Spatial attention dengan mean pooling dan max pooling
         self.spatial_attn = SpatialAttention(kernel_size=7)
@@ -1509,7 +1510,8 @@ class RFCBAM(nn.Module):
         # Final 3x3 convolution untuk resize
         # Jika stride=1, final stride=3 untuk maintain size; jika stride=2, final stride=2 untuk downsampling
         final_stride = 3 if s == 1 else s
-        self.final_conv = Conv(c1, c2, k=3, s=final_stride, p=1)
+        # Use simple conv without BN untuk avoid BatchNorm error pada small feature maps
+        self.final_conv = nn.Conv2d(c1, c2, k=3, s=final_stride, p=1, bias=True)
         
     def forward(self, x):
         """
@@ -1523,26 +1525,44 @@ class RFCBAM(nn.Module):
         5. Fuse attention dengan element-wise multiplication
         6. Final convolution untuk resize
         """
+        B, C, H, W = x.shape
+        min_spatial_size = min(H, W)
+        
         # Stage 1: Group convolution untuk extract receptive field features
         x = self.group_conv(x)
-        x = self.group_bn(x)
-        x = F.relu(x)
+        
+        # Skip BatchNorm jika spatial size terlalu kecil (untuk menghindari BatchNorm error)
+        if min_spatial_size > 1:
+            x = self.group_bn(x)
+            x = F.relu(x)
+        else:
+            # Fallback: skip BN untuk very small feature maps
+            x = F.relu(x)
         
         # Dimensional transformation: expand receptive field by 3x3
-        B, C, H, W = x.shape
-        x_expanded = self.expand_conv(x)  # [B, C*9, H, W]
-        
-        # Reshape untuk create expanded receptive field feature map
-        # Split into 9 parts (representing 3x3 receptive field positions)
-        x_expanded = x_expanded.view(B, C, 9, H, W)
-        
-        # Aggregate expanded features (simplified: use mean, full impl would rearrange spatially)
-        x_expanded = x_expanded.mean(dim=2)  # [B, C, H, W]
+        # Skip expansion jika spatial size terlalu kecil
+        if min_spatial_size > 1:
+            x_expanded = self.expand_conv(x)  # [B, C*9, H, W]
+            x_expanded = F.relu(x_expanded)
+            
+            # Reshape untuk create expanded receptive field feature map
+            # Split into 9 parts (representing 3x3 receptive field positions)
+            x_expanded = x_expanded.view(B, C, 9, H, W)
+            
+            # Aggregate expanded features (simplified: use mean, full impl would rearrange spatially)
+            x_expanded = x_expanded.mean(dim=2)  # [B, C, H, W]
+        else:
+            # Fallback: skip expansion untuk very small feature maps
+            x_expanded = x
         
         # Spatial attention dengan mean pooling dan max pooling
-        x_spatial = self.spatial_attn(x_expanded)
+        # Skip spatial attention jika spatial size terlalu kecil
+        if min_spatial_size > 1:
+            x_spatial = self.spatial_attn(x_expanded)
+        else:
+            x_spatial = x_expanded
         
-        # Channel attention dengan SE (Squeeze-and-Excitation)
+        # Channel attention dengan SE (Squeeze-and-Excitation) - selalu bisa digunakan
         x_channel = self.channel_attn(x_expanded)
         
         # Fuse attention dengan element-wise multiplication
@@ -1550,6 +1570,7 @@ class RFCBAM(nn.Module):
         
         # Final 3x3 convolution untuk resize
         x = self.final_conv(x)
+        x = F.relu(x)
         
         return x
 
