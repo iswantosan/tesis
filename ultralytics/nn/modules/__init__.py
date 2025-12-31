@@ -61,6 +61,7 @@ from .block import (
     SmallObjectBlock,
     RFCBAM,
     DySample,
+    DPCB,
 )
 from .conv import (
     CBAM,
@@ -168,5 +169,6 @@ __all__ = (
     "A2C2f",
     "SmallObjectBlock",
     "RFCBAM",
-    "DySample"
+    "DySample",
+    "DPCB"
 )

@@ -53,6 +53,7 @@ __all__ = (
     "SmallObjectBlock",
     "RFCBAM",
     "DySample",
+    "DPCB",
 )
 
 
@@ -1466,6 +1467,88 @@ class SmallObjectBlock(nn.Module):
         return x
 
 
+class DPCB(nn.Module):
+    """
+    Detail-Preserve Context Block (DPCB) for small object detection.
+    
+    Designed to add context without destroying detail information.
+    Uses dilated depthwise convolution to increase receptive field without pooling.
+    
+    Architecture:
+    - Conv 1×1 (reduce channel)
+    - DWConv 3×3 (stride 1) → preserve detail
+    - Dilated DWConv 3×3 (d=2) → wider context without pooling
+    - Conv 1×1 (restore)
+    - Skip connection (residual)
+    
+    Why suitable for small objects:
+    - No maxpooling (preserves spatial detail)
+    - Receptive field increases via dilation
+    - Residual connection preserves original features
+    
+    Args:
+        c1 (int): Input channels (auto-inferred from previous layer)
+        c2 (int): Output channels
+        reduction (float): Channel reduction factor for intermediate layers (default: 0.5)
+        dilation (int): Dilation rate for dilated DWConv (default: 2)
+        use_residual (bool): Whether to use residual connection (default: True)
+    """
+    
+    def __init__(self, c1, c2, reduction=0.5, dilation=2, use_residual=True):
+        """Initialize DPCB for detail-preserving context enhancement."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        self.use_residual = use_residual and (c1 == c2)
+        
+        # Calculate intermediate channels
+        c_reduced = int(c2 * reduction)
+        
+        # Conv 1×1 (reduce channel)
+        self.conv_reduce = Conv(c1, c_reduced, k=1, s=1, act=True)
+        
+        # DWConv 3×3 (stride 1) → preserve detail
+        self.dwconv_detail = DWConv(c_reduced, c_reduced, k=3, s=1, d=1, act=True)
+        
+        # Dilated DWConv 3×3 (d=2) → wider context without pooling
+        # Padding = dilation * (kernel_size - 1) / 2 = 2 * (3 - 1) / 2 = 2
+        self.dwconv_context = DWConv(c_reduced, c_reduced, k=3, s=1, d=dilation, act=True)
+        
+        # Conv 1×1 (restore)
+        self.conv_restore = Conv(c_reduced, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through DPCB.
+        
+        Process:
+        1. Reduce channels (1×1 conv)
+        2. Detail preservation (3×3 DWConv)
+        3. Context expansion (dilated 3×3 DWConv)
+        4. Restore channels (1×1 conv)
+        5. Residual connection (if applicable)
+        """
+        identity = x
+        
+        # Reduce channels
+        x = self.conv_reduce(x)
+        
+        # Detail preservation (local features)
+        x = self.dwconv_detail(x)
+        
+        # Context expansion (wider receptive field without pooling)
+        x = self.dwconv_context(x)
+        
+        # Restore channels
+        x = self.conv_restore(x)
+        
+        # Residual connection (preserve original features)
+        if self.use_residual:
+            x = x + identity
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.
@@ -1499,7 +1582,7 @@ class RFCBAM(nn.Module):
         # Dimensional transformation: expand receptive field features by factor of 3x3 = 9
         # Each spatial location gets expanded to 9 features (3x3 receptive field)
         # Use simple conv without BN untuk avoid BatchNorm error pada small feature maps
-        self.expand_conv = nn.Conv2d(c1, c1 * 9, k=1, s=1, bias=True)
+        self.expand_conv = nn.Conv2d(c1, c1 * 9, kernel_size=1, stride=1, bias=True)
         
         # Spatial attention dengan mean pooling dan max pooling
         self.spatial_attn = SpatialAttention(kernel_size=7)
@@ -1511,7 +1594,7 @@ class RFCBAM(nn.Module):
         # Jika stride=1, final stride=3 untuk maintain size; jika stride=2, final stride=2 untuk downsampling
         final_stride = 3 if s == 1 else s
         # Use simple conv without BN untuk avoid BatchNorm error pada small feature maps
-        self.final_conv = nn.Conv2d(c1, c2, k=3, s=final_stride, p=1, bias=True)
+        self.final_conv = nn.Conv2d(c1, c2, kernel_size=3, stride=final_stride, padding=1, bias=True)
         
     def forward(self, x):
         """
