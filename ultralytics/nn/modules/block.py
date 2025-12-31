@@ -54,6 +54,7 @@ __all__ = (
     "RFCBAM",
     "DySample",
     "DPCB",
+    "BFB",
 )
 
 
@@ -1544,6 +1545,106 @@ class DPCB(nn.Module):
         
         # Residual connection (preserve original features)
         if self.use_residual:
+            x = x + identity
+        
+        return x
+
+
+class BFB(nn.Module):
+    """
+    Balanced Fusion Block (BFB) for neck architecture.
+    
+    Solves the problem where high-resolution features (P3) often get "dominated" 
+    by features from lower layers in neck fusion.
+    
+    Architecture:
+    - Split concatenated features into high-res and low-res branches
+    - Conv1×1 on high-res branch
+    - Conv1×1 on low-res branch
+    - Concat both branches
+    - DWConv3×3 + Conv1×1 (repeat 1-2x)
+    - Residual connection
+    
+    Why suitable for small objects:
+    - Balanced processing of high-res and low-res features
+    - Prevents high-res features from being overwhelmed
+    - Preserves detail from high-resolution branch
+    - Efficient with depthwise convolution
+    
+    Args:
+        c1 (int): Input channels (auto-inferred, should be 2x output after Concat)
+        c2 (int): Output channels
+        n (int): Number of DWConv3×3 + Conv1×1 repetitions (default: 2)
+        use_residual (bool): Whether to use residual connection (default: True)
+    """
+    
+    def __init__(self, c1, c2, n=2, use_residual=True):
+        """Initialize BFB for balanced feature fusion in neck."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        self.use_residual = use_residual
+        self.n = n
+        
+        # Split input channels: assume high-res and low-res are concatenated
+        # Each branch gets half the channels
+        c_half = c1 // 2
+        
+        # Conv1×1 on high-res branch
+        self.conv_high = Conv(c_half, c_half, k=1, s=1, act=True)
+        
+        # Conv1×1 on low-res branch
+        self.conv_low = Conv(c_half, c_half, k=1, s=1, act=True)
+        
+        # Fusion blocks: DWConv3×3 + Conv1×1 (repeat n times)
+        self.fusion_blocks = nn.ModuleList()
+        for _ in range(n):
+            self.fusion_blocks.append(nn.Sequential(
+                DWConv(c1, c1, k=3, s=1, d=1, act=True),  # DWConv3×3
+                Conv(c1, c1, k=1, s=1, act=True)          # Conv1×1
+            ))
+        
+        # Final output projection
+        self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
+        
+        # Residual connection only works if input and output channels match
+        # After Concat, input is usually 2x output, so residual is disabled
+        self.can_use_residual = use_residual and (c1 == c2)
+        
+    def forward(self, x):
+        """
+        Forward pass through BFB.
+        
+        Process:
+        1. Split input into high-res and low-res branches (by channel)
+        2. Process each branch with Conv1×1
+        3. Concat both branches
+        4. Apply DWConv3×3 + Conv1×1 (n times)
+        5. Residual connection (if applicable)
+        """
+        identity = x
+        
+        # Split channels: first half = high-res, second half = low-res
+        c = x.shape[1] // 2
+        x_high = x[:, :c, :, :]  # High-res branch
+        x_low = x[:, c:, :, :]   # Low-res branch
+        
+        # Process each branch with Conv1×1
+        x_high = self.conv_high(x_high)
+        x_low = self.conv_low(x_low)
+        
+        # Concat both branches
+        x = torch.cat([x_high, x_low], dim=1)
+        
+        # Apply fusion blocks: DWConv3×3 + Conv1×1 (n times)
+        for fusion_block in self.fusion_blocks:
+            x = fusion_block(x)
+        
+        # Final output projection
+        x = self.conv_out(x)
+        
+        # Residual connection (only if input and output channels match)
+        if self.can_use_residual:
             x = x + identity
         
         return x
