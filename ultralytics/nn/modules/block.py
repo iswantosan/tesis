@@ -1720,6 +1720,109 @@ class EGB(nn.Module):
         return x
 
 
+class USF(nn.Module):
+    """
+    Upscale-Safe Fusion Block (USF) for neck architecture.
+    
+    Solves the problem where fine features from high-resolution layers (P3) 
+    get "overwhelmed" by coarse features from lower layers during upsample+concat fusion.
+    
+    Architecture:
+    - Conv 1×1 on high-res feature (normalize)
+    - Conv 1×1 on low-res feature (balance)
+    - Concat both processed features
+    - 2× (DWConv 3×3 + Conv1×1) for lightweight fusion
+    - Residual connection
+    
+    Flow: Conv1x1_hi → Conv1x1_lo → Concat → [DWConv3x3→Conv1x1]×2 + skip
+    
+    Why suitable for small objects:
+    - Balances high-res and low-res features before fusion
+    - Prevents fine features from being dominated
+    - Preserves detail from high-resolution branch
+    - Efficient with depthwise convolution
+    
+    Args:
+        c1_high (int): Input channels from high-res branch (auto-inferred)
+        c1_low (int): Input channels from low-res branch (auto-inferred)
+        c2 (int): Output channels
+        n (int): Number of DWConv3×3 + Conv1×1 repetitions (default: 2)
+        use_residual (bool): Whether to use residual connection (default: True)
+    """
+    
+    def __init__(self, c1_high, c1_low, c2, n=2, use_residual=True):
+        """Initialize USF for upscale-safe feature fusion in neck."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        self.use_residual = use_residual
+        self.n = n
+        
+        # Conv 1×1 on high-res branch (normalize)
+        self.conv_high = Conv(c1_high, c1_high, k=1, s=1, act=True)
+        
+        # Conv 1×1 on low-res branch (balance)
+        self.conv_low = Conv(c1_low, c1_low, k=1, s=1, act=True)
+        
+        # After concat, total channels = c1_high + c1_low
+        c_concat = c1_high + c1_low
+        
+        # Fusion blocks: DWConv3×3 + Conv1×1 (repeat n times)
+        self.fusion_blocks = nn.ModuleList()
+        for _ in range(n):
+            self.fusion_blocks.append(nn.Sequential(
+                DWConv(c_concat, c_concat, k=3, s=1, d=1, act=True),  # DWConv3×3
+                Conv(c_concat, c_concat, k=1, s=1, act=True)          # Conv1×1
+            ))
+        
+        # Final output projection
+        self.conv_out = Conv(c_concat, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through USF.
+        
+        Args:
+            x: List of 2 tensors [x_high, x_low]
+                x_high: High-resolution feature (already upsampled)
+                x_low: Low-resolution feature (from backbone)
+        
+        Process:
+        1. Normalize high-res feature with Conv1×1
+        2. Balance low-res feature with Conv1×1
+        3. Concat both processed features
+        4. Apply DWConv3×3 + Conv1×1 (n times)
+        5. Residual connection (if applicable)
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            x_high, x_low = x
+        else:
+            raise ValueError(f"USF expects list of 2 tensors, got {type(x)}")
+        
+        # Normalize high-res feature
+        x_high = self.conv_high(x_high)
+        
+        # Balance low-res feature
+        x_low = self.conv_low(x_low)
+        
+        # Concat both processed features
+        x = torch.cat([x_high, x_low], dim=1)
+        identity = x
+        
+        # Apply fusion blocks: DWConv3×3 + Conv1×1 (n times)
+        for fusion_block in self.fusion_blocks:
+            x = fusion_block(x)
+        
+        # Residual connection: skip from after concat to after fusion blocks
+        if self.use_residual:
+            x = x + identity
+        
+        # Final output projection
+        x = self.conv_out(x)
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.

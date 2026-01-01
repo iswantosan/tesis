@@ -75,6 +75,7 @@ from ultralytics.nn.modules import (
     DPCB,
     BFB,
     EGB,
+    USF,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1075,6 +1076,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is USF:
+            # USF receives 2 inputs: high-res and low-res
+            # Args: [c2, n, use_residual] where c2 is output channels
+            # Input channels are auto-inferred from f (list of 2 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c1_high = ch[f[0]]  # High-res branch channels
+                c1_low = ch[f[1]]   # Low-res branch channels
+                c2 = args[0] if args else c1_high  # Output channels
+                if c2 != nc:  # if c2 not equal to number of classes
+                    c2 = make_divisible(min(c2, max_channels) * width, 8)
+                n_repeats = args[1] if len(args) > 1 else 2  # Number of fusion blocks
+                use_residual = args[2] if len(args) > 2 else True
+                args = [c1_high, c1_low, c2, n_repeats, use_residual]
+            else:
+                raise ValueError(f"USF expects list of 2 layer indices in 'from', got {f}")
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
