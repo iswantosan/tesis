@@ -1914,6 +1914,239 @@ class MSA(nn.Module):
         return x
 
 
+class SOE(nn.Module):
+    """
+    Small Object Enhancement Block (SOE) for fine-grained feature extraction.
+    
+    Focuses on fine-grained features critical for small object detection.
+    
+    Architecture:
+    - Conv 1×1
+    - DepthWise Conv 5×5 stride=1 padding=2
+    - Channel Attention (Global AvgPool + FC)
+    - Conv 3×3
+    - Residual connection
+    
+    Why suitable for small objects:
+    - DepthWise Conv 5×5 captures larger spatial context
+    - Channel attention emphasizes important channels
+    - Residual connection preserves original features
+    - Focused on fine-grained details
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize SOE for small object enhancement."""
+        super().__init__()
+        from .conv import Conv, DWConv, ChannelAttention
+        
+        # Conv 1×1
+        self.conv1 = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # DepthWise Conv 5×5 stride=1 padding=2
+        self.dwconv = DWConv(c1, c1, k=5, s=1, d=1, act=True)
+        
+        # Channel Attention (Global AvgPool + FC)
+        self.channel_attn = ChannelAttention(c1)
+        
+        # Conv 3×3
+        self.conv3 = Conv(c1, c2, k=3, s=1, act=True)
+        
+        # Residual connection (only if channels match)
+        self.use_residual = (c1 == c2)
+        
+    def forward(self, x):
+        """
+        Forward pass through SOE.
+        
+        Process:
+        1. Conv 1×1
+        2. DepthWise Conv 5×5
+        3. Channel Attention
+        4. Conv 3×3
+        5. Residual connection
+        """
+        identity = x
+        
+        # Conv 1×1
+        x = self.conv1(x)
+        
+        # DepthWise Conv 5×5
+        x = self.dwconv(x)
+        
+        # Channel Attention
+        x = self.channel_attn(x)
+        
+        # Conv 3×3
+        x = self.conv3(x)
+        
+        # Residual connection
+        if self.use_residual:
+            x = x + identity
+        
+        return x
+
+
+class CA(nn.Module):
+    """
+    Context Aggregation Block (CA) for capturing context around small objects.
+    
+    Aggregates multi-scale contextual information using parallel pooling and convolution.
+    
+    Architecture:
+    - Conv 1×1
+    - Parallel branches:
+      * MaxPool 3×3 stride=1 padding=1
+      * AvgPool 3×3 stride=1 padding=1
+      * Conv 3×3
+    - Concat
+    - Conv 1×1 (feature fusion)
+    - SE/CBAM attention
+    
+    Why suitable for small objects:
+    - Multiple pooling strategies capture different context types
+    - Parallel processing maintains efficiency
+    - Attention mechanism emphasizes important features
+    - Effective for contextual understanding
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        use_cbam (bool): Use CBAM instead of ChannelAttention (default: False)
+    """
+    
+    def __init__(self, c1, c2, use_cbam=False):
+        """Initialize CA for context aggregation."""
+        super().__init__()
+        from .conv import Conv, ChannelAttention, CBAM
+        
+        # Conv 1×1
+        self.conv1 = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Parallel branches
+        # Branch 1: MaxPool 3×3 stride=1 padding=1
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        
+        # Branch 2: AvgPool 3×3 stride=1 padding=1
+        self.avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+        
+        # Branch 3: Conv 3×3
+        self.conv3 = Conv(c1, c1, k=3, s=1, act=True)
+        
+        # After concat, total channels = 3 * c1
+        c_concat = 3 * c1
+        
+        # Conv 1×1 (feature fusion)
+        self.conv_fusion = Conv(c_concat, c2, k=1, s=1, act=True)
+        
+        # SE/CBAM attention
+        if use_cbam:
+            self.attention = CBAM(c2, kernel_size=7)
+        else:
+            self.attention = ChannelAttention(c2)
+        
+    def forward(self, x):
+        """
+        Forward pass through CA.
+        
+        Process:
+        1. Conv 1×1
+        2. Parallel branches (MaxPool, AvgPool, Conv3×3)
+        3. Concat
+        4. Conv 1×1 fusion
+        5. Attention (SE/CBAM)
+        """
+        # Conv 1×1
+        x = self.conv1(x)
+        
+        # Parallel branches
+        branch1 = self.maxpool(x)  # MaxPool
+        branch2 = self.avgpool(x)  # AvgPool
+        branch3 = self.conv3(x)    # Conv 3×3
+        
+        # Concat
+        x = torch.cat([branch1, branch2, branch3], dim=1)
+        
+        # Conv 1×1 fusion
+        x = self.conv_fusion(x)
+        
+        # Attention
+        x = self.attention(x)
+        
+        return x
+
+
+class HRP(nn.Module):
+    """
+    High-Resolution Preservation Block (HRP) for preventing information loss in small objects.
+    
+    Maintains high-resolution features without pooling/downsampling operations.
+    
+    Architecture:
+    - Conv 3×3 stride=1 (NO pooling/downsampling)
+    - Dilated Conv 3×3 dilation=2
+    - Conv 1×1
+    - Skip connection
+    
+    Why suitable for small objects:
+    - NO pooling preserves spatial resolution
+    - Dilated convolution increases receptive field without downsampling
+    - Skip connection preserves original information
+    - Critical for small object detection where every pixel matters
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize HRP for high-resolution preservation."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Conv 3×3 stride=1 (NO pooling/downsampling)
+        self.conv3 = Conv(c1, c1, k=3, s=1, act=True)
+        
+        # Dilated Conv 3×3 dilation=2
+        self.dilated_conv = Conv(c1, c1, k=3, s=1, d=2, act=True)
+        
+        # Conv 1×1
+        self.conv1 = Conv(c1, c2, k=1, s=1, act=True)
+        
+        # Skip connection (only if channels match)
+        self.use_residual = (c1 == c2)
+        
+    def forward(self, x):
+        """
+        Forward pass through HRP.
+        
+        Process:
+        1. Conv 3×3 stride=1
+        2. Dilated Conv 3×3 dilation=2
+        3. Conv 1×1
+        4. Skip connection
+        """
+        identity = x
+        
+        # Conv 3×3 stride=1
+        x = self.conv3(x)
+        
+        # Dilated Conv 3×3 dilation=2
+        x = self.dilated_conv(x)
+        
+        # Conv 1×1
+        x = self.conv1(x)
+        
+        # Skip connection
+        if self.use_residual:
+            x = x + identity
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.
