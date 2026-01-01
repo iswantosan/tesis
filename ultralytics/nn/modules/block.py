@@ -3283,7 +3283,8 @@ class SACB(nn.Module):
         self.conv7 = Conv(c1, c2, k=7, s=1, act=True)
         
         # Weight generation: compute statistics and generate weights
-        self.stat_conv = Conv(c1, c1, k=1, s=1, act=True)
+        # After concat mean+variance, channels become 2*c1
+        self.stat_conv = Conv(2 * c1, c1, k=1, s=1, act=True)
         self.weight_conv = Conv(c1, 3, k=1, s=1, act=False)  # Output 3 weights for 3 kernels
         self.softmax = nn.Softmax(dim=1)
         
@@ -3394,7 +3395,8 @@ class FDEB(nn.Module):
         self.use_residual = (c1 == c2)
         
         # Learnable high-frequency amplification
-        self.amp_conv = Conv(c1, c1, k=1, s=1, act=True)
+        # After concat real+imaginary, channels become 2*c1
+        self.amp_conv = Conv(2 * c1, 2 * c1, k=1, s=1, act=True)
         
         # Final projection
         self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
