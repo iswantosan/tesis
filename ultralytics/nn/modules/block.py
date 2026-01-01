@@ -3596,6 +3596,412 @@ class FBSBT(nn.Module):
         return x
 
 
+class FPI(nn.Module):
+    """
+    Feature Pyramid Injection: Inject P4 and P5 features into P3.
+    
+    Architecture:
+    - P5 → Conv1x1 reduce → Downsample 4x → inject to P3
+    - P4 → Conv1x1 reduce → Downsample 2x → inject to P3
+    - Concat [P3_original, P4_inject, P5_inject]
+    - Conv3x3 → Conv1x1 bottleneck
+    
+    Args:
+        c_p3 (int): P3 channels
+        c_p4 (int): P4 channels
+        c_p5 (int): P5 channels
+        c_out (int): Output channels
+    """
+    
+    def __init__(self, c_p3, c_p4, c_p5, c_out):
+        """Initialize FPI for feature pyramid injection."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Reduce and downsample P5 (4x)
+        self.p5_reduce = Conv(c_p5, c_p3, k=1, s=1, act=True)
+        self.p5_downsample = nn.AvgPool2d(kernel_size=4, stride=4)
+        
+        # Reduce and downsample P4 (2x)
+        self.p4_reduce = Conv(c_p4, c_p3, k=1, s=1, act=True)
+        self.p4_downsample = nn.AvgPool2d(kernel_size=2, stride=2)
+        
+        # After concat: P3 + P4_inject + P5_inject = 3 * c_p3
+        self.conv_fusion = Conv(c_p3 * 3, c_p3, k=3, s=1, act=True)
+        self.conv_bottleneck = Conv(c_p3, c_out, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through FPI.
+        
+        Args:
+            x: List of 3 tensors [P3, P4, P5]
+        
+        Returns:
+            Enhanced P3 features
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 3:
+            p3, p4, p5 = x
+        else:
+            raise ValueError(f"FPI expects list of 3 tensors [P3, P4, P5], got {type(x)}")
+        
+        # Process P5: reduce and downsample 4x
+        p5_reduced = self.p5_reduce(p5)
+        p5_inject = self.p5_downsample(p5_reduced)
+        
+        # Process P4: reduce and downsample 2x
+        p4_reduced = self.p4_reduce(p4)
+        p4_inject = self.p4_downsample(p4_reduced)
+        
+        # Ensure spatial dimensions match P3
+        _, _, h3, w3 = p3.shape
+        if p4_inject.shape[2:] != (h3, w3):
+            p4_inject = F.interpolate(p4_inject, size=(h3, w3), mode='bilinear', align_corners=False)
+        if p5_inject.shape[2:] != (h3, w3):
+            p5_inject = F.interpolate(p5_inject, size=(h3, w3), mode='bilinear', align_corners=False)
+        
+        # Concat all features
+        x = torch.cat([p3, p4_inject, p5_inject], dim=1)
+        
+        # Fusion and bottleneck
+        x = self.conv_fusion(x)
+        x = self.conv_bottleneck(x)
+        return x
+
+
+class SPP3(nn.Module):
+    """
+    Spatial Pyramid Pooling for P3: Multi-scale context aggregation.
+    
+    Architecture:
+    - Parallel pooling: MaxPool 5x5, 9x9, 13x13
+    - Original features
+    - Concat → Conv1x1
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize SPP3 for spatial pyramid pooling."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Parallel pooling branches
+        self.pool5 = nn.MaxPool2d(kernel_size=5, stride=1, padding=2)
+        self.pool9 = nn.MaxPool2d(kernel_size=9, stride=1, padding=4)
+        self.pool13 = nn.MaxPool2d(kernel_size=13, stride=1, padding=6)
+        
+        # After concat: 4 * c1 (original + 3 pools)
+        self.conv_out = Conv(c1 * 4, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through SPP3."""
+        # Parallel pooling
+        pool5_out = self.pool5(x)
+        pool9_out = self.pool9(x)
+        pool13_out = self.pool13(x)
+        
+        # Concat all
+        x = torch.cat([x, pool5_out, pool9_out, pool13_out], dim=1)
+        x = self.conv_out(x)
+        return x
+
+
+class CSFR(nn.Module):
+    """
+    Cross-Stage Feature Refinement: Bi-directional flow between P3 and P4.
+    
+    Architecture:
+    - P3 → Conv1x1 → send to P4
+    - P4 process → Upsample 2x → return to P3
+    - P3_refined = P3_original + returned_from_P4
+    - Conv3x3
+    
+    Args:
+        c_p3 (int): P3 channels
+        c_p4 (int): P4 channels
+        c_out (int): Output channels
+    """
+    
+    def __init__(self, c_p3, c_p4, c_out):
+        """Initialize CSFR for cross-stage feature refinement."""
+        super().__init__()
+        from .conv import Conv
+        
+        # P3 → P4: reduce and prepare
+        self.p3_to_p4 = Conv(c_p3, c_p4, k=1, s=1, act=True)
+        
+        # P4 processing
+        self.p4_process = Conv(c_p4, c_p4, k=3, s=1, act=True)
+        
+        # P4 → P3: upsample and return
+        self.p4_to_p3 = Conv(c_p4, c_p3, k=1, s=1, act=True)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        
+        # Final refinement
+        self.conv_refine = Conv(c_p3, c_out, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through CSFR.
+        
+        Args:
+            x: List of 2 tensors [P3, P4]
+        
+        Returns:
+            Refined P3 features
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            p3, p4 = x
+        else:
+            raise ValueError(f"CSFR expects list of 2 tensors [P3, P4], got {type(x)}")
+        
+        # P3 → P4
+        p3_sent = self.p3_to_p4(p3)
+        
+        # P4 process (add P3 info)
+        p4_enhanced = self.p4_process(p4 + p3_sent)
+        
+        # P4 → P3: return refined features
+        p4_returned = self.p4_to_p3(p4_enhanced)
+        p4_returned = self.upsample(p4_returned)
+        
+        # Ensure spatial match
+        _, _, h3, w3 = p3.shape
+        if p4_returned.shape[2:] != (h3, w3):
+            p4_returned = F.interpolate(p4_returned, size=(h3, w3), mode='bilinear', align_corners=False)
+        
+        # Refine P3
+        p3_refined = p3 + p4_returned
+        x = self.conv_refine(p3_refined)
+        return x
+
+
+class DenseP3(nn.Module):
+    """
+    Dense Connection for P3 Neck: Dense information flow.
+    
+    Architecture:
+    - Layer 1: Conv3x3 → save f1
+    - Layer 2: Conv3x3(concat[input, f1]) → save f2
+    - Layer 3: Conv3x3(concat[input, f1, f2])
+    - Conv1x1 bottleneck
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize DenseP3 for dense connections."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Dense layers
+        self.conv1 = Conv(c1, c1, k=3, s=1, act=True)
+        self.conv2 = Conv(c1 * 2, c1, k=3, s=1, act=True)  # input + f1
+        self.conv3 = Conv(c1 * 3, c1, k=3, s=1, act=True)  # input + f1 + f2
+        
+        # Bottleneck
+        self.conv_bottleneck = Conv(c1, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through DenseP3."""
+        identity = x
+        
+        # Layer 1
+        f1 = self.conv1(x)
+        
+        # Layer 2: concat input + f1
+        x2 = torch.cat([identity, f1], dim=1)
+        f2 = self.conv2(x2)
+        
+        # Layer 3: concat input + f1 + f2
+        x3 = torch.cat([identity, f1, f2], dim=1)
+        f3 = self.conv3(x3)
+        
+        # Bottleneck
+        x = self.conv_bottleneck(f3)
+        return x
+
+
+class DeformableHead(nn.Module):
+    """
+    Deformable Detection Head: Adaptive geometric transformation.
+    
+    Architecture:
+    - Normal flow → Deformable Conv3x3 (offset learning)
+    - Conv3x3 → output
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize DeformableHead for adaptive detection."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Generate offsets for deformable conv
+        self.offset_conv = Conv(c1, 18, k=3, s=1, act=False)  # 2 * 3 * 3 = 18 for 3x3 kernel
+        
+        # Deformable conv (simulated with grid_sample)
+        self.conv_normal = Conv(c1, c2, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through DeformableHead."""
+        B, C, H, W = x.shape
+        
+        # Skip deformable if spatial size too small
+        if min(H, W) < 3:
+            return self.conv_normal(x)
+        
+        # Generate offsets
+        offsets = self.offset_conv(x)  # [B, 18, H, W]
+        offsets = offsets * 0.1  # Scale for stability
+        offsets = offsets.view(B, 2, 9, H, W)  # [B, 2, 9, H, W] (2 for x,y, 9 for 3x3 kernel)
+        
+        # Create base grid
+        y_coords, x_coords = torch.meshgrid(
+            torch.arange(H, dtype=x.dtype, device=x.device),
+            torch.arange(W, dtype=x.dtype, device=x.device),
+            indexing='ij'
+        )
+        grid = torch.stack([x_coords, y_coords], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)  # [B, 2, H, W]
+        
+        # Apply offsets (simplified: use center offset)
+        center_offset = offsets[:, :, 4, :, :]  # [B, 2, H, W] (center of 3x3 kernel)
+        grid = grid + center_offset
+        
+        # Normalize grid
+        grid = grid.permute(0, 2, 3, 1)  # [B, H, W, 2]
+        if W > 1:
+            grid[:, :, :, 0] = 2.0 * grid[:, :, :, 0] / (W - 1) - 1.0
+        else:
+            grid[:, :, :, 0] = 0.0
+        if H > 1:
+            grid[:, :, :, 1] = 2.0 * grid[:, :, :, 1] / (H - 1) - 1.0
+        else:
+            grid[:, :, :, 1] = 0.0
+        
+        # Apply deformable sampling
+        x_deform = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        
+        # Final conv
+        x = self.conv_normal(x_deform)
+        return x
+
+
+class OCS(nn.Module):
+    """
+    Object-Context Separation: Separate object and context features.
+    
+    Architecture:
+    - Context branch: LargeKernel Conv (7x7 or 9x9)
+    - Object branch: SmallKernel Conv (3x3)
+    - Gate = sigmoid(Conv1x1(context))
+    - Output = object * gate + context * (1-gate)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        large_kernel (int): Large kernel size for context (default: 7)
+    """
+    
+    def __init__(self, c1, c2, large_kernel=7):
+        """Initialize OCS for object-context separation."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Context branch: large kernel
+        padding = large_kernel // 2
+        self.context_conv = Conv(c1, c2, k=large_kernel, s=1, p=padding, act=True)
+        
+        # Object branch: small kernel
+        self.object_conv = Conv(c1, c2, k=3, s=1, act=True)
+        
+        # Gate generation
+        self.gate_conv = Conv(c2, c2, k=1, s=1, act=False)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """Forward pass through OCS."""
+        # Context branch
+        context = self.context_conv(x)
+        
+        # Object branch
+        obj = self.object_conv(x)
+        
+        # Generate gate from context
+        gate = self.sigmoid(self.gate_conv(context))
+        
+        # Combine: object * gate + context * (1-gate)
+        x = obj * gate + context * (1 - gate)
+        return x
+
+
+class RPP(nn.Module):
+    """
+    Resolution-Preserved Path: Direct connection from P2 to P3 detection.
+    
+    Architecture:
+    - From P2 backbone: Conv1x1 reduce
+    - Upsample or keep → direct connect to P3 detection
+    - Concat with normal P3 neck output
+    
+    Args:
+        c_p2 (int): P2 channels
+        c_p3 (int): P3 channels
+        c_out (int): Output channels
+    """
+    
+    def __init__(self, c_p2, c_p3, c_out):
+        """Initialize RPP for resolution-preserved path."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Reduce P2 channels
+        self.p2_reduce = Conv(c_p2, c_p3, k=1, s=1, act=True)
+        
+        # Upsample if needed (P2 is 2x larger than P3)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        
+        # Fusion
+        self.conv_fusion = Conv(c_p3 * 2, c_out, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through RPP.
+        
+        Args:
+            x: List of 2 tensors [P3_neck, P2_backbone]
+        
+        Returns:
+            Enhanced P3 features with preserved resolution
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            p3_neck, p2_backbone = x
+        else:
+            raise ValueError(f"RPP expects list of 2 tensors [P3_neck, P2_backbone], got {type(x)}")
+        
+        # Process P2
+        p2_reduced = self.p2_reduce(p2_backbone)
+        p2_upsampled = self.upsample(p2_reduced)
+        
+        # Ensure spatial match
+        _, _, h3, w3 = p3_neck.shape
+        if p2_upsampled.shape[2:] != (h3, w3):
+            p2_upsampled = F.interpolate(p2_upsampled, size=(h3, w3), mode='bilinear', align_corners=False)
+        
+        # Concat and fuse
+        x = torch.cat([p3_neck, p2_upsampled], dim=1)
+        x = self.conv_fusion(x)
+        return x
+
+
 class FDEB(nn.Module):
     """
     Frequency Domain Enhancement Block for FFT-based high-frequency boost.

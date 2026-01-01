@@ -98,6 +98,13 @@ from ultralytics.nn.modules import (
     FBSBE,
     FBSBMS,
     FBSBT,
+    FPI,
+    SPP3,
+    CSFR,
+    DenseP3,
+    DeformableHead,
+    OCS,
+    RPP,
     FDEB,
     DPRB,
 )
@@ -1211,6 +1218,54 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             c1 = ch[f]  # Input channels from previous layer
             args = [c1, c2]
+        elif m is FPI:
+            # FPI receives 3 inputs: [P3, P4, P5]
+            # Args: [c_out] where c_out is output channels
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                c_p3 = ch[f[0]]  # P3 channels
+                c_p4 = ch[f[1]]  # P4 channels
+                c_p5 = ch[f[2]]  # P5 channels
+                c_out = args[0] if args else c_p3  # Output channels
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c_p3, c_p4, c_p5, c_out]
+            else:
+                raise ValueError(f"FPI expects list of 3 layer indices in 'from', got {f}")
+        elif m is CSFR:
+            # CSFR receives 2 inputs: [P3, P4]
+            # Args: [c_out] where c_out is output channels
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c_p3 = ch[f[0]]  # P3 channels
+                c_p4 = ch[f[1]]  # P4 channels
+                c_out = args[0] if args else c_p3  # Output channels
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c_p3, c_p4, c_out]
+            else:
+                raise ValueError(f"CSFR expects list of 2 layer indices in 'from', got {f}")
+        elif m is RPP:
+            # RPP receives 2 inputs: [P3_neck, P2_backbone]
+            # Args: [c_out] where c_out is output channels
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c_p3 = ch[f[0]]  # P3 neck channels
+                c_p2 = ch[f[1]]  # P2 backbone channels
+                c_out = args[0] if args else c_p3  # Output channels
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c_p2, c_p3, c_out]
+            else:
+                raise ValueError(f"RPP expects list of 2 layer indices in 'from', got {f}")
+        elif m in {SPP3, DenseP3, DeformableHead, OCS}:
+            # These blocks need (c1, c2) where c1 is input channels and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            if m is OCS:
+                large_kernel = args[1] if len(args) > 1 else 7  # Optional large kernel size
+                args = [c1, c2, large_kernel]
+            else:
+                args = [c1, c2]
         elif m is DySample:
             # DySample needs channels from previous layer
             c1 = ch[f]
