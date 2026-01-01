@@ -3471,7 +3471,12 @@ class FDEB(nn.Module):
         x_fft_concat = torch.cat([x_fft_real, x_fft_imag], dim=1)  # [B, 2*C, H_pad, W_pad//2+1]
         
         # Amplify high-frequency components (learnable)
+        # Get the dtype of amp_conv weights to ensure dtype match
+        amp_conv_dtype = next(self.amp_conv.parameters()).dtype
+        x_fft_concat = x_fft_concat.to(amp_conv_dtype)
         x_fft_amp = self.amp_conv(x_fft_concat)
+        # Convert back to float32 for IFFT
+        x_fft_amp = x_fft_amp.float()
         
         # Split back
         x_fft_amp_real = x_fft_amp[:, :C, :, :]
@@ -3487,14 +3492,14 @@ class FDEB(nn.Module):
         if H_pad != H or W_pad != W:
             x_enhanced = x_enhanced[:, :, :H, :W]
         
-        # Convert back to original dtype
+        # Convert back to original dtype before residual and final conv
         x_enhanced = x_enhanced.to(original_dtype)
         
-        # Residual add dengan original
+        # Residual add dengan original (ensure same dtype)
         if self.use_residual:
-            x_enhanced = x_enhanced + identity
+            x_enhanced = x_enhanced + identity.to(original_dtype)
         
-        # Final projection
+        # Final projection (input and weights will match dtype now)
         x = self.conv_out(x_enhanced)
         return x
 
