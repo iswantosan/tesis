@@ -2437,7 +2437,7 @@ class FA(nn.Module):
         # Global Context (GAP + Conv 1×1 without BN to avoid 1x1 BatchNorm error)
         self.gap = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
         # Use simple conv without BN for 1x1 input to avoid BatchNorm error
-        self.global_conv = nn.Conv2d(c1, c1, k=1, s=1, bias=True)
+        self.global_conv = nn.Conv2d(c1, c1, kernel_size=1, stride=1, bias=True)
         self.global_act = nn.SiLU()
         nn.init.kaiming_normal_(self.global_conv.weight, mode='fan_out', nonlinearity='relu')
         nn.init.constant_(self.global_conv.bias, 0)
