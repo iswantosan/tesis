@@ -3284,8 +3284,10 @@ class SACB(nn.Module):
         
         # Weight generation: compute statistics and generate weights
         # After concat mean+variance, channels become 2*c1
-        self.stat_conv = Conv(2 * c1, c1, k=1, s=1, act=True)
-        self.weight_conv = Conv(c1, 3, k=1, s=1, act=False)  # Output 3 weights for 3 kernels
+        # Use nn.Conv2d directly (without BatchNorm) for 1x1 spatial inputs to avoid BatchNorm error
+        self.stat_conv = nn.Conv2d(2 * c1, c1, k=1, s=1, bias=True)
+        self.weight_conv = nn.Conv2d(c1, 3, k=1, s=1, bias=True)  # Output 3 weights for 3 kernels
+        self.act = nn.SiLU()  # Activation for stat_conv
         self.softmax = nn.Softmax(dim=1)
         
     def forward(self, x):
@@ -3299,7 +3301,8 @@ class SACB(nn.Module):
         variance = ((x - mean) ** 2).mean(dim=[2, 3], keepdim=True)
         
         # Combine mean and variance for statistics
-        stats = self.stat_conv(torch.cat([mean, variance], dim=1))
+        # Apply activation after stat_conv (no BatchNorm, so apply activation manually)
+        stats = self.act(self.stat_conv(torch.cat([mean, variance], dim=1)))
         
         # Generate kernel size weights (small object → larger kernel)
         # Higher variance/mean → smaller objects → use larger kernel
@@ -3405,22 +3408,43 @@ class FDEB(nn.Module):
         """Forward pass through FDEB."""
         identity = x
         B, C, H, W = x.shape
+        original_dtype = x.dtype
+        
+        # Always convert to float32 for FFT to avoid cuFFT half precision issues
+        x_float = x.float()
+        
+        # Check if dimensions are power of 2 (required for cuFFT in half precision)
+        # If not, pad to nearest power of 2
+        def next_power_of_2(n):
+            return 1 << (n - 1).bit_length()
+        
+        def is_power_of_2(n):
+            return (n & (n - 1)) == 0 and n > 0
+        
+        # Pad if needed
+        H_pad = H if is_power_of_2(H) else next_power_of_2(H)
+        W_pad = W if is_power_of_2(W) else next_power_of_2(W)
+        
+        if H_pad != H or W_pad != W:
+            # Pad to power of 2
+            pad_h = (H_pad - H) // 2
+            pad_w = (W_pad - W) // 2
+            x_padded = F.pad(x_float, (pad_w, W_pad - W - pad_w, pad_h, H_pad - H - pad_h), mode='reflect')
+        else:
+            x_padded = x_float
         
         # FFT transform (apply to each channel separately)
-        x_fft = torch.fft.rfft2(x, norm='ortho')  # [B, C, H, W//2+1] complex
+        x_fft = torch.fft.rfft2(x_padded, norm='ortho')  # [B, C, H_pad, W_pad//2+1] complex
         
         # Separate real and imaginary parts
         x_fft_real = x_fft.real
         x_fft_imag = x_fft.imag
         
         # Concatenate real and imaginary for processing
-        x_fft_concat = torch.cat([x_fft_real, x_fft_imag], dim=1)  # [B, 2*C, H, W//2+1]
+        x_fft_concat = torch.cat([x_fft_real, x_fft_imag], dim=1)  # [B, 2*C, H_pad, W_pad//2+1]
         
         # Amplify high-frequency components (learnable)
-        # Reshape for conv processing
-        x_fft_reshaped = x_fft_concat.view(B, 2*C, H, W//2+1)
-        # Use 1x1 conv for amplification (simplified, full impl would use frequency-specific weights)
-        x_fft_amp = self.amp_conv(x_fft_reshaped)
+        x_fft_amp = self.amp_conv(x_fft_concat)
         
         # Split back
         x_fft_amp_real = x_fft_amp[:, :C, :, :]
@@ -3430,7 +3454,14 @@ class FDEB(nn.Module):
         x_fft_enhanced = torch.complex(x_fft_amp_real, x_fft_amp_imag)
         
         # IFFT back
-        x_enhanced = torch.fft.irfft2(x_fft_enhanced, s=(H, W), norm='ortho')
+        x_enhanced = torch.fft.irfft2(x_fft_enhanced, s=(H_pad, W_pad), norm='ortho')
+        
+        # Crop back to original size if padded
+        if H_pad != H or W_pad != W:
+            x_enhanced = x_enhanced[:, :, :H, :W]
+        
+        # Convert back to original dtype
+        x_enhanced = x_enhanced.to(original_dtype)
         
         # Residual add dengan original
         if self.use_residual:
