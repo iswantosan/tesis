@@ -69,6 +69,10 @@ from .block import (
     SOE,
     CA,
     HRP,
+    PFR,
+    ARF,
+    SOP,
+    FA,
 )
 from .conv import (
     CBAM,
@@ -185,4 +189,8 @@ __all__ = (
     "SOE",
     "CA",
     "HRP",
+    "PFR",
+    "ARF",
+    "SOP",
+    "FA",
 )

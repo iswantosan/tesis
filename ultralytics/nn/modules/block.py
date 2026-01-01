@@ -2147,6 +2147,337 @@ class HRP(nn.Module):
         return x
 
 
+class PFR(nn.Module):
+    """
+    Pyramid Feature Refinement Block (PFR) for refining P2 features with info from P3/P4.
+    
+    Explicitly refines P2 features using information from higher pyramid levels.
+    
+    Architecture:
+    - Upsample P3 to P2 size (bilinear)
+    - Upsample P4 to P2 size (bilinear)
+    - Concat [P2, P3_up, P4_up]
+    - Conv 1×1 -> reduce channels
+    - Conv 3×3 -> Conv 3×3 (cascade refinement)
+    - Spatial + Channel Attention
+    - Conv 1×1 output
+    
+    Args:
+        c2 (int): P2 channels
+        c3 (int): P3 channels
+        c4 (int): P4 channels
+        c_out (int): Output channels
+        reduction_ratio (int): Channel reduction ratio (default: 2)
+    """
+    
+    def __init__(self, c2, c3, c4, c_out, reduction_ratio=2):
+        """Initialize PFR for pyramid feature refinement."""
+        super().__init__()
+        from .conv import Conv, CBAM
+        
+        # After concat: c2 + c3 + c4 channels
+        c_concat = c2 + c3 + c4
+        
+        # Conv 1×1 -> reduce channels
+        c_reduced = max(c_concat // reduction_ratio, c_out)
+        self.conv_reduce = Conv(c_concat, c_reduced, k=1, s=1, act=True)
+        
+        # Conv 3×3 -> Conv 3×3 (cascade refinement)
+        self.conv3_1 = Conv(c_reduced, c_reduced, k=3, s=1, act=True)
+        self.conv3_2 = Conv(c_reduced, c_reduced, k=3, s=1, act=True)
+        
+        # Spatial + Channel Attention (using CBAM)
+        self.attention = CBAM(c_reduced, kernel_size=7)
+        
+        # Conv 1×1 output
+        self.conv_out = Conv(c_reduced, c_out, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through PFR.
+        
+        Args:
+            x: List of 3 tensors [P2, P3, P4]
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 3:
+            p2, p3, p4 = x
+        else:
+            raise ValueError(f"PFR expects list of 3 tensors [P2, P3, P4], got {type(x)}")
+        
+        # Get P2 spatial size
+        _, _, h2, w2 = p2.shape
+        
+        # Upsample P3 to P2 size (bilinear)
+        p3_up = F.interpolate(p3, size=(h2, w2), mode='bilinear', align_corners=False)
+        
+        # Upsample P4 to P2 size (bilinear)
+        p4_up = F.interpolate(p4, size=(h2, w2), mode='bilinear', align_corners=False)
+        
+        # Concat [P2, P3_up, P4_up]
+        x = torch.cat([p2, p3_up, p4_up], dim=1)
+        
+        # Conv 1×1 -> reduce channels
+        x = self.conv_reduce(x)
+        
+        # Conv 3×3 -> Conv 3×3 (cascade refinement)
+        x = self.conv3_1(x)
+        x = self.conv3_2(x)
+        
+        # Spatial + Channel Attention
+        x = self.attention(x)
+        
+        # Conv 1×1 output
+        x = self.conv_out(x)
+        
+        return x
+
+
+class ARF(nn.Module):
+    """
+    Adaptive Receptive Field Block (ARF) for dynamic receptive field adjustment.
+    
+    Uses parallel multi-kernel depthwise convolutions with learnable weights.
+    
+    Architecture:
+    - Conv 1×1
+    - Parallel Multi-Kernel (depthwise):
+      * Conv 3×3 groups=channels
+      * Conv 5×5 groups=channels
+      * Conv 7×7 groups=channels
+    - Learn weights for each kernel (1×1 conv -> sigmoid)
+    - Weighted sum of all kernels
+    - Conv 1×1 projection
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize ARF for adaptive receptive field."""
+        super().__init__()
+        from .conv import DWConv, Conv
+        
+        # Conv 1×1
+        self.conv1 = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Parallel Multi-Kernel (depthwise)
+        self.dwconv3 = DWConv(c1, c1, k=3, s=1, d=1, act=True)  # 3×3
+        self.dwconv5 = DWConv(c1, c1, k=5, s=1, d=1, act=True)  # 5×5
+        self.dwconv7 = DWConv(c1, c1, k=7, s=1, d=1, act=True)  # 7×7
+        
+        # Learn weights for each kernel (1×1 conv -> sigmoid)
+        self.weight_conv = Conv(c1, 3, k=1, s=1, act=False)  # Output 3 weights
+        self.sigmoid = nn.Sigmoid()
+        
+        # Conv 1×1 projection
+        self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through ARF.
+        
+        Process:
+        1. Conv 1×1
+        2. Parallel multi-kernel depthwise convs
+        3. Learn weights and weighted sum
+        4. Conv 1×1 projection
+        """
+        # Conv 1×1
+        x = self.conv1(x)
+        
+        # Parallel multi-kernel depthwise convs
+        branch3 = self.dwconv3(x)  # 3×3
+        branch5 = self.dwconv5(x)  # 5×5
+        branch7 = self.dwconv7(x)  # 7×7
+        
+        # Learn weights for each kernel
+        weights = self.sigmoid(self.weight_conv(x))  # [B, 3, H, W]
+        w3 = weights[:, 0:1, :, :]  # [B, 1, H, W]
+        w5 = weights[:, 1:2, :, :]
+        w7 = weights[:, 2:3, :, :]
+        
+        # Weighted sum of all kernels
+        x = w3 * branch3 + w5 * branch5 + w7 * branch7
+        
+        # Conv 1×1 projection
+        x = self.conv_out(x)
+        
+        return x
+
+
+class SOP(nn.Module):
+    """
+    Small Object Prior Block (SOP) for biasing network toward small objects using deformable conv.
+    
+    Uses deformable convolution with offset learning to focus on small object features.
+    
+    Architecture:
+    - Deformable Conv 3×3 (offset learning)
+    - Conv 3×3 standard
+    - Element-wise multiply
+    - Channel Shuffle
+    - Conv 1×1
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize SOP for small object prior."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Offset learning for deformable conv (simple version using offset conv)
+        self.offset_conv = Conv(c1, 18, k=3, s=1, act=False)  # 3×3 kernel needs 18 offsets (2*3*3)
+        
+        # Standard Conv 3×3 (will be used with grid_sample for deformable effect)
+        self.conv_standard = Conv(c1, c1, k=3, s=1, act=True)
+        
+        # Conv 1×1 for final output
+        self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
+        
+        # Channel shuffle (for permutation)
+        self.channel_shuffle_groups = 4  # Shuffle in groups
+        
+    def forward(self, x):
+        """
+        Forward pass through SOP.
+        
+        Process:
+        1. Generate offsets for deformable conv
+        2. Apply deformable conv (using grid_sample)
+        3. Standard conv 3×3
+        4. Element-wise multiply
+        5. Channel shuffle
+        6. Conv 1×1
+        """
+        B, C, H, W = x.shape
+        
+        # Generate offsets
+        offsets = self.offset_conv(x)  # [B, 18, H, W]
+        offsets = offsets * 0.1  # Scale offsets for stability
+        
+        # Reshape offsets for grid_sample
+        # For 3×3 kernel, we need 9 sampling points
+        offsets = offsets.view(B, 2, 9, H, W)
+        
+        # Create base grid
+        y_coords, x_coords = torch.meshgrid(
+            torch.arange(H, dtype=x.dtype, device=x.device),
+            torch.arange(W, dtype=x.dtype, device=x.device),
+            indexing='ij'
+        )
+        grid = torch.stack([x_coords, y_coords], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)  # [B, 2, H, W]
+        
+        # Apply offsets (simplified: use center point offset for simplicity)
+        # For full deformable conv, would need to apply to all 9 points
+        # Here we use simplified version with center offset
+        center_offset = offsets[:, :, 4, :, :]  # [B, 2, H, W] - center point
+        grid = grid + center_offset
+        
+        # Normalize grid to [-1, 1]
+        grid = grid.permute(0, 2, 3, 1)  # [B, H, W, 2]
+        grid[:, :, :, 0] = 2.0 * grid[:, :, :, 0] / (W - 1) - 1.0
+        grid[:, :, :, 1] = 2.0 * grid[:, :, :, 1] / (H - 1) - 1.0
+        
+        # Apply deformable sampling (simplified)
+        x_deform = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        
+        # Standard Conv 3×3
+        x_standard = self.conv_standard(x)
+        
+        # Element-wise multiply
+        x = x_deform * x_standard
+        
+        # Channel Shuffle (simplified)
+        # Reshape: [B, C, H, W] -> [B, groups, C//groups, H, W] -> permute -> reshape back
+        groups = self.channel_shuffle_groups
+        n, c, h, w = x.shape
+        x = x.view(n, groups, c // groups, h, w)
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        x = x.view(n, c, h, w)
+        
+        # Conv 1×1
+        x = self.conv_out(x)
+        
+        return x
+
+
+class FA(nn.Module):
+    """
+    Feature Amplification Block (FA) for amplifying small object signals.
+    
+    Amplifies local detail features using global context information.
+    
+    Architecture:
+    - Global Context (GAP + Conv 1×1)
+    - Local Detail (Conv 3×3)
+    - Difference = abs(Local - Global_broadcast)
+    - Gate = sigmoid(Conv 1×1(Difference))
+    - Output = Local * (1 + Gate)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FA for feature amplification."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Global Context (GAP + Conv 1×1)
+        self.gap = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
+        self.global_conv = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Local Detail (Conv 3×3)
+        self.local_conv = Conv(c1, c1, k=3, s=1, act=True)
+        
+        # Gate generation
+        self.gate_conv = Conv(c1, c1, k=1, s=1, act=False)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Final output conv
+        self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through FA.
+        
+        Process:
+        1. Global Context (GAP + Conv 1×1)
+        2. Local Detail (Conv 3×3)
+        3. Difference = abs(Local - Global_broadcast)
+        4. Gate = sigmoid(Conv 1×1(Difference))
+        5. Output = Local * (1 + Gate)
+        """
+        # Global Context (GAP + Conv 1×1)
+        global_feat = self.gap(x)  # [B, C, 1, 1]
+        global_feat = self.global_conv(global_feat)  # [B, C, 1, 1]
+        
+        # Local Detail (Conv 3×3)
+        local_feat = self.local_conv(x)  # [B, C, H, W]
+        
+        # Broadcast global to local spatial size
+        global_broadcast = global_feat.expand_as(local_feat)  # [B, C, H, W]
+        
+        # Difference = abs(Local - Global_broadcast)
+        diff = torch.abs(local_feat - global_broadcast)
+        
+        # Gate = sigmoid(Conv 1×1(Difference))
+        gate = self.sigmoid(self.gate_conv(diff))
+        
+        # Output = Local * (1 + Gate)
+        x = local_feat * (1 + gate)
+        
+        # Final conv
+        x = self.conv_out(x)
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.

@@ -80,6 +80,10 @@ from ultralytics.nn.modules import (
     SOE,
     CA,
     HRP,
+    PFR,
+    ARF,
+    SOP,
+    FA,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1032,6 +1036,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SOE,
             CA,
             HRP,
+            PFR,
+            ARF,
+            SOP,
+            FA,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1100,6 +1108,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c1_high, c1_low, c2, n_repeats, use_residual]
             else:
                 raise ValueError(f"USF expects list of 2 layer indices in 'from', got {f}")
+        elif m is PFR:
+            # PFR receives 3 inputs: P2, P3, P4
+            # Args: [c_out, reduction_ratio] where c_out is output channels
+            # Input channels are auto-inferred from f (list of 3 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                c2 = ch[f[0]]  # P2 channels
+                c3 = ch[f[1]]  # P3 channels
+                c4 = ch[f[2]]  # P4 channels
+                c_out = args[0] if args else c2  # Output channels
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                reduction_ratio = args[1] if len(args) > 1 else 2
+                args = [c2, c3, c4, c_out, reduction_ratio]
+            else:
+                raise ValueError(f"PFR expects list of 3 layer indices in 'from', got {f}")
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
