@@ -3478,15 +3478,26 @@ class FDEB(nn.Module):
         # Convert back to float32 for IFFT
         x_fft_amp = x_fft_amp.float()
         
+        # Clamp to prevent extreme values that can cause NaN in IFFT
+        # Use a reasonable range to prevent numerical instability
+        x_fft_amp = torch.clamp(x_fft_amp, min=-1e6, max=1e6)
+        
         # Split back
         x_fft_amp_real = x_fft_amp[:, :C, :, :]
         x_fft_amp_imag = x_fft_amp[:, C:, :, :]
+        
+        # Clamp real and imaginary parts separately to prevent NaN
+        x_fft_amp_real = torch.clamp(x_fft_amp_real, min=-1e6, max=1e6)
+        x_fft_amp_imag = torch.clamp(x_fft_amp_imag, min=-1e6, max=1e6)
         
         # Reconstruct complex tensor
         x_fft_enhanced = torch.complex(x_fft_amp_real, x_fft_amp_imag)
         
         # IFFT back
         x_enhanced = torch.fft.irfft2(x_fft_enhanced, s=(H_pad, W_pad), norm='ortho')
+        
+        # Check for NaN/Inf and replace with zeros to prevent propagation
+        x_enhanced = torch.nan_to_num(x_enhanced, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Crop back to original size if padded
         if H_pad != H or W_pad != W:
@@ -3495,12 +3506,20 @@ class FDEB(nn.Module):
         # Convert back to original dtype before residual and final conv
         x_enhanced = x_enhanced.to(original_dtype)
         
+        # Clamp output to reasonable range before residual to prevent NaN propagation
+        x_enhanced = torch.clamp(x_enhanced, min=-1e3, max=1e3)
+        
         # Residual add dengan original (ensure same dtype)
         if self.use_residual:
             x_enhanced = x_enhanced + identity.to(original_dtype)
+            # Check for NaN after residual addition
+            x_enhanced = torch.nan_to_num(x_enhanced, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Final projection (input and weights will match dtype now)
         x = self.conv_out(x_enhanced)
+        
+        # Final NaN check before returning
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         return x
 
 
