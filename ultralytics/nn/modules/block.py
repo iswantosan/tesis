@@ -2329,17 +2329,17 @@ class SOP(nn.Module):
         super().__init__()
         from .conv import Conv
         
-        # Offset learning for deformable conv (simple version using offset conv)
-        self.offset_conv = Conv(c1, 18, k=3, s=1, act=False)  # 3×3 kernel needs 18 offsets (2*3*3)
+        # Offset learning for deformable conv (simplified: only 2 offsets for x and y)
+        self.offset_conv = Conv(c1, 2, k=3, s=1, act=False)  # Only 2 offsets (x, y) for simplicity
         
-        # Standard Conv 3×3 (will be used with grid_sample for deformable effect)
+        # Standard Conv 3×3
         self.conv_standard = Conv(c1, c1, k=3, s=1, act=True)
         
         # Conv 1×1 for final output
         self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
         
-        # Channel shuffle (for permutation)
-        self.channel_shuffle_groups = 4  # Shuffle in groups
+        # Channel shuffle groups
+        self.channel_shuffle_groups = max(4, c1 // 64)  # Adaptive groups
         
     def forward(self, x):
         """
@@ -2355,13 +2355,16 @@ class SOP(nn.Module):
         """
         B, C, H, W = x.shape
         
-        # Generate offsets
-        offsets = self.offset_conv(x)  # [B, 18, H, W]
-        offsets = offsets * 0.1  # Scale offsets for stability
+        # Skip deformable conv if spatial size too small
+        if min(H, W) < 3:
+            # Fallback: just use standard conv
+            x = self.conv_standard(x)
+            x = self.conv_out(x)
+            return x
         
-        # Reshape offsets for grid_sample
-        # For 3×3 kernel, we need 9 sampling points
-        offsets = offsets.view(B, 2, 9, H, W)
+        # Generate offsets (simplified: only x and y offsets)
+        offsets = self.offset_conv(x)  # [B, 2, H, W]
+        offsets = offsets * 0.1  # Scale offsets for stability
         
         # Create base grid
         y_coords, x_coords = torch.meshgrid(
@@ -2371,18 +2374,21 @@ class SOP(nn.Module):
         )
         grid = torch.stack([x_coords, y_coords], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)  # [B, 2, H, W]
         
-        # Apply offsets (simplified: use center point offset for simplicity)
-        # For full deformable conv, would need to apply to all 9 points
-        # Here we use simplified version with center offset
-        center_offset = offsets[:, :, 4, :, :]  # [B, 2, H, W] - center point
-        grid = grid + center_offset
+        # Apply offsets
+        grid = grid + offsets
         
-        # Normalize grid to [-1, 1]
+        # Normalize grid to [-1, 1] (handle edge case when H or W = 1)
         grid = grid.permute(0, 2, 3, 1)  # [B, H, W, 2]
-        grid[:, :, :, 0] = 2.0 * grid[:, :, :, 0] / (W - 1) - 1.0
-        grid[:, :, :, 1] = 2.0 * grid[:, :, :, 1] / (H - 1) - 1.0
+        if W > 1:
+            grid[:, :, :, 0] = 2.0 * grid[:, :, :, 0] / (W - 1) - 1.0
+        else:
+            grid[:, :, :, 0] = 0.0
+        if H > 1:
+            grid[:, :, :, 1] = 2.0 * grid[:, :, :, 1] / (H - 1) - 1.0
+        else:
+            grid[:, :, :, 1] = 0.0
         
-        # Apply deformable sampling (simplified)
+        # Apply deformable sampling
         x_deform = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
         
         # Standard Conv 3×3
@@ -2391,13 +2397,13 @@ class SOP(nn.Module):
         # Element-wise multiply
         x = x_deform * x_standard
         
-        # Channel Shuffle (simplified)
-        # Reshape: [B, C, H, W] -> [B, groups, C//groups, H, W] -> permute -> reshape back
+        # Channel Shuffle (only if channels divisible by groups)
         groups = self.channel_shuffle_groups
-        n, c, h, w = x.shape
-        x = x.view(n, groups, c // groups, h, w)
-        x = x.permute(0, 2, 1, 3, 4).contiguous()
-        x = x.view(n, c, h, w)
+        if C % groups == 0 and groups > 1:
+            n, c, h, w = x.shape
+            x = x.view(n, groups, c // groups, h, w)
+            x = x.permute(0, 2, 1, 3, 4).contiguous()
+            x = x.view(n, c, h, w)
         
         # Conv 1×1
         x = self.conv_out(x)
@@ -2428,9 +2434,13 @@ class FA(nn.Module):
         super().__init__()
         from .conv import Conv
         
-        # Global Context (GAP + Conv 1×1)
+        # Global Context (GAP + Conv 1×1 without BN to avoid 1x1 BatchNorm error)
         self.gap = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
-        self.global_conv = Conv(c1, c1, k=1, s=1, act=True)
+        # Use simple conv without BN for 1x1 input to avoid BatchNorm error
+        self.global_conv = nn.Conv2d(c1, c1, k=1, s=1, bias=True)
+        self.global_act = nn.SiLU()
+        nn.init.kaiming_normal_(self.global_conv.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.global_conv.bias, 0)
         
         # Local Detail (Conv 3×3)
         self.local_conv = Conv(c1, c1, k=3, s=1, act=True)
@@ -2455,7 +2465,7 @@ class FA(nn.Module):
         """
         # Global Context (GAP + Conv 1×1)
         global_feat = self.gap(x)  # [B, C, 1, 1]
-        global_feat = self.global_conv(global_feat)  # [B, C, 1, 1]
+        global_feat = self.global_act(self.global_conv(global_feat))  # [B, C, 1, 1] - no BN to avoid error
         
         # Local Detail (Conv 3×3)
         local_feat = self.local_conv(x)  # [B, C, H, W]
