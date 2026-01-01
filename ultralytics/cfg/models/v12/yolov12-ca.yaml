@@ -33,7 +33,7 @@ head:
   - [-1, 2, A2C2f, [512, False, -1]] # 11
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [-1, 1, CA, [256, 256]] # CA Block: Context Aggregation after P2 upsampling
+  - [-1, 1, CA, [256]] # CA Block: Context Aggregation after P2 upsampling (c2=256, use_cbam=False default)
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
   - [-1, 2, A2C2f, [256, False, -1]] # 14
 
