@@ -63,6 +63,7 @@ from .block import (
     DySample,
     DPCB,
     BFB,
+    EGB,
 )
 from .conv import (
     CBAM,
@@ -172,5 +173,6 @@ __all__ = (
     "RFCBAM",
     "DySample",
     "DPCB",
-    "BFB"
+    "BFB",
+    "EGB"
 )

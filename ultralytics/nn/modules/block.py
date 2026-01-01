@@ -1650,6 +1650,76 @@ class BFB(nn.Module):
         return x
 
 
+class EGB(nn.Module):
+    """
+    Edge-Gated Block (EGB) for enhanced edge/texture feature extraction.
+    
+    Helps the model better understand textures/edges (point/line objects).
+    Uses a gating mechanism to selectively enhance edge-like features.
+    
+    Architecture:
+    - DWConv 3×3 (extract edge-like features)
+    - Conv 1×1 (process edge features)
+    - Sigmoid gate (generate attention weights)
+    - Multiply gate with input (selective enhancement)
+    - Residual connection
+    
+    Formula: DW3 → Conv1x1 → Sigmoid → x*gate + x
+    
+    Why suitable for small objects:
+    - Focuses on edge/texture information critical for small objects
+    - Gating mechanism allows selective feature enhancement
+    - Preserves original features via residual connection
+    - Efficient with depthwise convolution
+    
+    Args:
+        c1 (int): Input channels (auto-inferred from previous layer)
+        c2 (int): Output channels
+        use_residual (bool): Whether to use residual connection (default: True)
+    """
+    
+    def __init__(self, c1, c2, use_residual=True):
+        """Initialize EGB for edge/texture feature enhancement."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        self.use_residual = use_residual and (c1 == c2)
+        
+        # DWConv 3×3 (extract edge-like features)
+        self.dwconv = DWConv(c1, c1, k=3, s=1, d=1, act=True)
+        
+        # Conv 1×1 (process edge features)
+        self.conv = Conv(c1, c1, k=1, s=1, act=False)  # No activation before sigmoid
+        
+        # Sigmoid gate (will be applied in forward)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """
+        Forward pass through EGB.
+        
+        Process:
+        1. Extract edge features (DWConv 3×3)
+        2. Process edges (Conv 1×1)
+        3. Generate gate weights (Sigmoid)
+        4. Multiply gate with input (selective enhancement)
+        5. Residual connection (preserve original features)
+        """
+        identity = x
+        
+        # DWConv 3×3 → Conv 1×1 → Sigmoid → gate
+        gate = self.sigmoid(self.conv(self.dwconv(x)))
+        
+        # Multiply gate with input: x * gate
+        x = x * gate
+        
+        # Residual connection: x * gate + x = x * (gate + 1)
+        if self.use_residual:
+            x = x + identity
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.
