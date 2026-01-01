@@ -1204,6 +1204,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]
+        elif m in {FBSB, FBSBE, FBSBMS, FBSBT}:
+            # FBSB variants need (c1, c2) where c1 is input channels and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args, or same as input if not specified
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            args = [c1, c2]
         elif m is DySample:
             # DySample needs channels from previous layer
             c1 = ch[f]
