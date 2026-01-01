@@ -2583,12 +2583,13 @@ class ASFF(nn.Module):
         p3_aligned = p3_original
         p4_aligned = self.align_p4(p4_resized)
         
-        # Double-check spatial sizes match (safety check)
-        # If still mismatch, force resize
-        if p2_aligned.shape[2:] != (h3, w3):
-            p2_aligned = F.interpolate(p2_aligned, size=(h3, w3), mode='bilinear', align_corners=False)
-        if p4_aligned.shape[2:] != (h3, w3):
-            p4_aligned = F.interpolate(p4_aligned, size=(h3, w3), mode='bilinear', align_corners=False)
+        # Final safety check: ensure all have same spatial size before concat
+        # This handles edge cases where Conv might have changed size (shouldn't happen with 1x1, but safety first)
+        target_size = p3_aligned.shape[2:]
+        if p2_aligned.shape[2:] != target_size:
+            p2_aligned = F.interpolate(p2_aligned, size=target_size, mode='bilinear', align_corners=False)
+        if p4_aligned.shape[2:] != target_size:
+            p4_aligned = F.interpolate(p4_aligned, size=target_size, mode='bilinear', align_corners=False)
         
         # Concat all aligned features
         x_concat = torch.cat([p2_aligned, p3_aligned, p4_aligned], dim=1)  # [B, 3*C, H, W]
