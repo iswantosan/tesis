@@ -1124,6 +1124,21 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c2, c3, c4, c_out, reduction_ratio]
             else:
                 raise ValueError(f"PFR expects list of 3 layer indices in 'from', got {f}")
+        elif m is ASFF:
+            # ASFF receives 3 inputs: P2, P3, P4
+            # Args: [c_out, target_scale] where c_out is output channels (optional)
+            # Input channels are auto-inferred from f (list of 3 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                c2 = ch[f[0]]  # P2 channels
+                c3 = ch[f[1]]  # P3 channels
+                c4 = ch[f[2]]  # P4 channels
+                c_out = args[0] if args else c3  # Output channels (default: P3 channels)
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                target_scale = args[1] if len(args) > 1 else 'P3'
+                args = [c2, c3, c4, c_out, target_scale]
+            else:
+                raise ValueError(f"ASFF expects list of 3 layer indices in 'from', got {f}")
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
