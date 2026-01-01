@@ -3285,8 +3285,8 @@ class SACB(nn.Module):
         # Weight generation: compute statistics and generate weights
         # After concat mean+variance, channels become 2*c1
         # Use nn.Conv2d directly (without BatchNorm) for 1x1 spatial inputs to avoid BatchNorm error
-        self.stat_conv = nn.Conv2d(2 * c1, c1, k=1, s=1, bias=True)
-        self.weight_conv = nn.Conv2d(c1, 3, k=1, s=1, bias=True)  # Output 3 weights for 3 kernels
+        self.stat_conv = nn.Conv2d(2 * c1, c1, kernel_size=1, stride=1, bias=True)
+        self.weight_conv = nn.Conv2d(c1, 3, kernel_size=1, stride=1, bias=True)  # Output 3 weights for 3 kernels
         self.act = nn.SiLU()  # Activation for stat_conv
         self.softmax = nn.Softmax(dim=1)
         
