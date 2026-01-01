@@ -84,6 +84,9 @@ from .block import (
     FDB,
     SACB,
     FBSB,
+    FBSBE,
+    FBSBMS,
+    FBSBT,
     FDEB,
     DPRB,
 )
@@ -217,6 +220,9 @@ __all__ = (
     "FDB",
     "SACB",
     "FBSB",
+    "FBSBE",
+    "FBSBMS",
+    "FBSBT",
     "FDEB",
     "DPRB",
 )

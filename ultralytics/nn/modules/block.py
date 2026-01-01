@@ -3402,6 +3402,200 @@ class FBSB(nn.Module):
         return x
 
 
+class FBSBE(nn.Module):
+    """
+    FBSB-Enhanced: Deeper processing per stream + residual connection.
+    
+    Architecture:
+    - Generate mask with BatchNorm
+    - Foreground: x * mask → Conv3x3 → BN → SiLU (deeper refinement)
+    - Background: x * (1-mask) → Conv3x3 → BN → SiLU
+    - Concat → Conv1x1 → residual add with input
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FBSB-Enhanced for deeper foreground-background separation."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Generate attention mask with BatchNorm
+        self.mask_conv = nn.Conv2d(c1, 1, kernel_size=1, stride=1, bias=False)
+        self.mask_bn = nn.BatchNorm2d(1)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Foreground stream: deeper processing
+        self.fg_conv = Conv(c1, c2 // 2, k=3, s=1, act=True)
+        
+        # Background stream: deeper processing
+        self.bg_conv = Conv(c1, c2 // 2, k=3, s=1, act=True)
+        
+        # Final fusion
+        self.conv_out = Conv(c2, c2, k=1, s=1, act=True)
+        
+        # Residual connection (only if channels match)
+        self.use_residual = (c1 == c2)
+        
+    def forward(self, x):
+        """Forward pass through FBSB-Enhanced."""
+        identity = x
+        
+        # Generate attention mask with BatchNorm
+        mask = self.mask_conv(x)
+        mask = self.mask_bn(mask)
+        mask = self.sigmoid(mask)  # [B, 1, H, W]
+        
+        # Foreground stream: features * mask → deeper refinement
+        fg_features = x * mask
+        fg_out = self.fg_conv(fg_features)
+        
+        # Background stream: features * (1-mask) → deeper refinement
+        bg_features = x * (1 - mask)
+        bg_out = self.bg_conv(bg_features)
+        
+        # Concat and final processing
+        x = torch.cat([fg_out, bg_out], dim=1)
+        x = self.conv_out(x)
+        
+        # Residual connection
+        if self.use_residual:
+            x = x + identity
+        
+        return x
+
+
+class FBSBMS(nn.Module):
+    """
+    FBSB-MultiScale: Multi-scale mask generation for different object sizes.
+    
+    Architecture:
+    - Generate masks at multiple scales (1x1, 3x3, 5x5)
+    - Fuse masks: Conv1x1(concat[mask_1x1, mask_3x3, mask_5x5]) → Sigmoid
+    - Foreground: x * mask_final → Conv3x3
+    - Background: x * (1-mask_final) → Conv3x3
+    - Concat → Conv1x1
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FBSB-MultiScale for multi-scale mask generation."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        # Multi-scale mask generation
+        self.mask_1x1 = nn.Conv2d(c1, 1, kernel_size=1, stride=1, bias=False)
+        self.mask_3x3 = nn.Conv2d(c1, 1, kernel_size=3, stride=1, padding=1, bias=False)
+        self.mask_5x5 = DWConv(c1, 1, k=5, s=1, d=1, act=False)
+        
+        # Fuse masks
+        self.mask_fuse = Conv(3, 1, k=1, s=1, act=False)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Foreground stream processing
+        self.fg_conv = Conv(c1, c2 // 2, k=3, s=1, act=True)
+        
+        # Background stream processing
+        self.bg_conv = Conv(c1, c2 // 2, k=3, s=1, act=True)
+        
+        # Final fusion
+        self.conv_out = Conv(c2, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through FBSB-MultiScale."""
+        # Generate masks at multiple scales
+        mask_1x1 = self.mask_1x1(x)  # [B, 1, H, W]
+        mask_3x3 = self.mask_3x3(x)  # [B, 1, H, W]
+        mask_5x5 = self.mask_5x5(x)  # [B, 1, H, W]
+        
+        # Fuse masks
+        mask_concat = torch.cat([mask_1x1, mask_3x3, mask_5x5], dim=1)  # [B, 3, H, W]
+        mask_fused = self.mask_fuse(mask_concat)  # [B, 1, H, W]
+        mask_final = self.sigmoid(mask_fused)
+        
+        # Foreground stream: features * mask_final
+        fg_features = x * mask_final
+        fg_out = self.fg_conv(fg_features)
+        
+        # Background stream: features * (1-mask_final)
+        bg_features = x * (1 - mask_final)
+        bg_out = self.bg_conv(bg_features)
+        
+        # Concat and final processing
+        x = torch.cat([fg_out, bg_out], dim=1)
+        x = self.conv_out(x)
+        return x
+
+
+class FBSBT(nn.Module):
+    """
+    FBSB-Triple: Three-way separation for small objects, medium objects, and background.
+    
+    Architecture:
+    - Generate 3-class mask: Conv1x1 → Softmax (3 classes)
+    - Small objects: x * mask[:,:,:,0] → Conv3x3
+    - Medium objects: x * mask[:,:,:,1] → Conv3x3
+    - Background: x * mask[:,:,:,2] → Conv3x3
+    - Concat all → Conv1x1
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FBSB-Triple for three-way object separation."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Generate 3-class mask (small, medium, background)
+        self.mask_conv = Conv(c1, 3, k=1, s=1, act=False)
+        self.softmax = nn.Softmax(dim=1)
+        
+        # Process each category separately
+        # Output channels divided by 3 for each stream
+        stream_channels = c2 // 3
+        self.small_conv = Conv(c1, stream_channels, k=3, s=1, act=True)
+        self.medium_conv = Conv(c1, stream_channels, k=3, s=1, act=True)
+        self.bg_conv = Conv(c1, stream_channels, k=3, s=1, act=True)
+        
+        # Final fusion (handle remainder if c2 not divisible by 3)
+        self.conv_out = Conv(c2, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through FBSB-Triple."""
+        # Generate 3-class mask
+        mask_logits = self.mask_conv(x)  # [B, 3, H, W]
+        mask = self.softmax(mask_logits)  # [B, 3, H, W]
+        
+        # Split mask into 3 classes
+        mask_small = mask[:, 0:1, :, :]   # [B, 1, H, W]
+        mask_medium = mask[:, 1:2, :, :]  # [B, 1, H, W]
+        mask_bg = mask[:, 2:3, :, :]      # [B, 1, H, W]
+        
+        # Small objects stream
+        small_features = x * mask_small
+        small_out = self.small_conv(small_features)
+        
+        # Medium objects stream
+        medium_features = x * mask_medium
+        medium_out = self.medium_conv(medium_features)
+        
+        # Background stream
+        bg_features = x * mask_bg
+        bg_out = self.bg_conv(bg_features)
+        
+        # Concat all streams
+        x = torch.cat([small_out, medium_out, bg_out], dim=1)
+        x = self.conv_out(x)
+        return x
+
+
 class FDEB(nn.Module):
     """
     Frequency Domain Enhancement Block for FFT-based high-frequency boost.

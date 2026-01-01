@@ -95,6 +95,9 @@ from ultralytics.nn.modules import (
     FDB,
     SACB,
     FBSB,
+    FBSBE,
+    FBSBMS,
+    FBSBT,
     FDEB,
     DPRB,
 )
