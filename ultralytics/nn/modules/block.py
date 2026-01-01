@@ -55,6 +55,12 @@ __all__ = (
     "DySample",
     "DPCB",
     "BFB",
+    "SOFP",
+    "HRDE",
+    "MDA",
+    "DSOB",
+    "EAE",
+    "CIB2",
 )
 
 
@@ -2777,3 +2783,352 @@ class DySample(nn.Module):
         x_upsampled = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
         
         return x_upsampled
+
+
+class SOFP(nn.Module):
+    """
+    Small Object Feature Pyramid Block for enhanced small object detection.
+    
+    Architecture:
+    - Conv 3x3 stride=1
+    - Conv 3x3 stride=1
+    - Upsample 2x (bilinear)
+    - Conv 1x1
+    - Concat with backbone P2
+    - Conv 3x3 stride=1
+    
+    Args:
+        c1 (int): Input channels (from neck)
+        c2 (int): Output channels
+        c_p2 (int): Backbone P2 channels (for concatenation)
+    """
+    
+    def __init__(self, c1, c2, c_p2):
+        """Initialize SOFP for small object feature pyramid."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Conv 3x3 stride=1
+        self.conv1 = Conv(c1, c1, k=3, s=1, act=True)
+        # Conv 3x3 stride=1
+        self.conv2 = Conv(c1, c1, k=3, s=1, act=True)
+        # Upsample 2x (bilinear)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # Conv 1x1
+        self.conv_reduce = Conv(c1, c_p2, k=1, s=1, act=True)
+        # Conv 3x3 stride=1 (after concat, input will be c_p2*2)
+        self.conv_out = Conv(c_p2 * 2, c2, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through SOFP.
+        
+        Args:
+            x: List of 2 tensors [neck_output, p2_backbone]
+        
+        Returns:
+            Enhanced feature for P2 detection head
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            neck_out, p2 = x
+        else:
+            raise ValueError(f"SOFP expects list of 2 tensors [neck_output, p2_backbone], got {type(x)}")
+        
+        # Process through conv layers
+        x = self.conv1(neck_out)
+        x = self.conv2(x)
+        # Upsample 2x
+        x = self.upsample(x)
+        # Reduce channels
+        x = self.conv_reduce(x)
+        # Concat with backbone P2
+        x = torch.cat([x, p2], dim=1)
+        # Final conv
+        x = self.conv_out(x)
+        return x
+
+
+class HRDE(nn.Module):
+    """
+    High-Res Detail Extractor Block for preserving fine details in P2 stage.
+    
+    Architecture:
+    - Conv 1x1 (reduce channel)
+    - DepthwiseConv 5x5 stride=1 padding=2
+    - Conv 1x1 (expand channel)
+    - Add (residual)
+    - GELU activation
+    - Conv 3x3 stride=1
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        reduction (float): Channel reduction ratio (default: 0.5)
+    """
+    
+    def __init__(self, c1, c2, reduction=0.5):
+        """Initialize HRDE for high-resolution detail extraction."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        c_reduced = int(c2 * reduction)
+        self.use_residual = (c1 == c2)
+        
+        # Conv 1x1 (reduce channel)
+        self.conv_reduce = Conv(c1, c_reduced, k=1, s=1, act=True)
+        # DepthwiseConv 5x5 stride=1 padding=2
+        self.dwconv = DWConv(c_reduced, c_reduced, k=5, s=1, d=1, act=True)
+        # Conv 1x1 (expand channel)
+        self.conv_expand = Conv(c_reduced, c2, k=1, s=1, act=False)  # No act before residual
+        # GELU activation
+        self.gelu = nn.GELU()
+        # Conv 3x3 stride=1
+        self.conv_out = Conv(c2, c2, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through HRDE."""
+        identity = x
+        # Reduce channel
+        x = self.conv_reduce(x)
+        # Depthwise conv
+        x = self.dwconv(x)
+        # Expand channel
+        x = self.conv_expand(x)
+        # Add residual
+        if self.use_residual:
+            x = x + identity
+        # GELU activation
+        x = self.gelu(x)
+        # Final conv
+        x = self.conv_out(x)
+        return x
+
+
+class MDA(nn.Module):
+    """
+    Multi-Dilation Aggregator Block for multi-scale feature aggregation.
+    
+    Architecture:
+    - Conv 1x1
+    - Branch parallel:
+      - Conv 3x3 dilation=1
+      - Conv 3x3 dilation=2
+      - Conv 3x3 dilation=3
+    - Concat all branches
+    - Conv 1x1 (channel reduction)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        reduction_ratio (int): Channel reduction ratio for parallel branches (default: 4)
+    """
+    
+    def __init__(self, c1, c2, reduction_ratio=4):
+        """Initialize MDA for multi-dilation aggregation."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_reduced = max(c1 // reduction_ratio, 1)
+        c_concat = c_reduced * 3
+        
+        # Conv 1x1
+        self.conv_reduce = Conv(c1, c_reduced, k=1, s=1, act=True)
+        # Parallel branches with different dilations
+        self.branch1 = Conv(c_reduced, c_reduced, k=3, s=1, d=1, act=True)  # dilation=1
+        self.branch2 = Conv(c_reduced, c_reduced, k=3, s=1, d=2, act=True)  # dilation=2
+        self.branch3 = Conv(c_reduced, c_reduced, k=3, s=1, d=3, act=True)  # dilation=3
+        # Conv 1x1 (channel reduction)
+        self.conv_out = Conv(c_concat, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through MDA."""
+        # Reduce channels
+        x = self.conv_reduce(x)
+        # Parallel branches
+        branch1 = self.branch1(x)
+        branch2 = self.branch2(x)
+        branch3 = self.branch3(x)
+        # Concat all branches
+        x = torch.cat([branch1, branch2, branch3], dim=1)
+        # Channel reduction
+        x = self.conv_out(x)
+        return x
+
+
+class DSOB(nn.Module):
+    """
+    Dense Small Object Block for dense feature extraction in P2 head.
+    
+    Architecture:
+    - Conv 3x3 stride=1 → f1
+    - Conv 3x3 stride=1 → f2
+    - Concat [input, f1, f2]
+    - Conv 1x1 (bottleneck)
+    - Conv 3x3 stride=1
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        bottleneck_ratio (float): Bottleneck channel ratio (default: 0.5)
+    """
+    
+    def __init__(self, c1, c2, bottleneck_ratio=0.5):
+        """Initialize DSOB for dense small object processing."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_bottleneck = int(c1 * bottleneck_ratio)
+        
+        # Conv 3x3 stride=1 → f1
+        self.conv_f1 = Conv(c1, c1, k=3, s=1, act=True)
+        # Conv 3x3 stride=1 → f2
+        self.conv_f2 = Conv(c1, c1, k=3, s=1, act=True)
+        # Conv 1x1 (bottleneck) - input will be c1*3 after concat
+        self.conv_bottleneck = Conv(c1 * 3, c_bottleneck, k=1, s=1, act=True)
+        # Conv 3x3 stride=1
+        self.conv_out = Conv(c_bottleneck, c2, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through DSOB."""
+        identity = x
+        # Generate f1 and f2
+        f1 = self.conv_f1(x)
+        f2 = self.conv_f2(f1)  # Process f1 to get f2
+        # Concat [input, f1, f2]
+        x = torch.cat([identity, f1, f2], dim=1)
+        # Bottleneck
+        x = self.conv_bottleneck(x)
+        # Final conv
+        x = self.conv_out(x)
+        return x
+
+
+class EAE(nn.Module):
+    """
+    Edge-Aware Enhancement Block for edge-aware feature enhancement.
+    
+    Architecture:
+    - Conv 3x3 stride=1 → feature_main
+    - Sobel/Laplacian filter (fixed weight) → edge_map
+    - Conv 1x1 on edge_map
+    - Multiply: feature_main * edge_enhanced
+    - Conv 3x3 stride=1
+    - Add residual
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize EAE for edge-aware enhancement."""
+        super().__init__()
+        from .conv import Conv
+        
+        self.use_residual = (c1 == c2)
+        
+        # Conv 3x3 stride=1 → feature_main
+        self.conv_main = Conv(c1, c1, k=3, s=1, act=True)
+        # Fixed Sobel filter for edge detection (X direction)
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
+        # Register as buffer (not trainable parameter)
+        self.register_buffer('sobel_x', sobel_x.repeat(c1, 1, 1, 1))
+        self.register_buffer('sobel_y', sobel_y.repeat(c1, 1, 1, 1))
+        # Conv 1x1 on edge_map
+        self.conv_edge = Conv(c1, c1, k=1, s=1, act=True)
+        # Conv 3x3 stride=1
+        self.conv_out = Conv(c1, c2, k=3, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through EAE."""
+        identity = x
+        # Feature main
+        feature_main = self.conv_main(x)
+        # Edge detection using Sobel filters
+        edge_x = F.conv2d(x, self.sobel_x, padding=1, groups=x.shape[1])
+        edge_y = F.conv2d(x, self.sobel_y, padding=1, groups=x.shape[1])
+        edge_map = torch.sqrt(edge_x ** 2 + edge_y ** 2 + 1e-6)  # Gradient magnitude
+        # Conv 1x1 on edge_map
+        edge_enhanced = self.conv_edge(edge_map)
+        # Multiply: feature_main * edge_enhanced
+        x = feature_main * (1 + edge_enhanced)  # Element-wise multiply with enhancement
+        # Conv 3x3 stride=1
+        x = self.conv_out(x)
+        # Add residual
+        if self.use_residual:
+            x = x + identity
+        return x
+
+
+class CIB2(nn.Module):
+    """
+    Context Injection Block for injecting context from P3 to P2.
+    
+    Architecture:
+    - Input dari P3: Upsample 2x
+    - Input dari P2: identity
+    - Concat [P2, P3_up]
+    - Conv 3x3 stride=1
+    - MaxPool 3x3 stride=1 padding=1
+    - Conv 3x3 stride=1
+    - Conv 1x1
+    
+    Args:
+        c_p2 (int): P2 channels
+        c_p3 (int): P3 channels
+        c_out (int): Output channels (default: same as P2)
+    """
+    
+    def __init__(self, c_p2, c_p3, c_out=None):
+        """Initialize CIB2 for context injection."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c_out is None:
+            c_out = c_p2
+        
+        # Upsample 2x (will be done in forward)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # Conv 1x1 to match P2 channels (before concat)
+        self.conv_p3 = Conv(c_p3, c_p2, k=1, s=1, act=True)
+        # Concat [P2, P3_up] -> input will be c_p2*2
+        # Conv 3x3 stride=1
+        self.conv1 = Conv(c_p2 * 2, c_p2, k=3, s=1, act=True)
+        # MaxPool 3x3 stride=1 padding=1
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        # Conv 3x3 stride=1
+        self.conv2 = Conv(c_p2, c_p2, k=3, s=1, act=True)
+        # Conv 1x1
+        self.conv_out = Conv(c_p2, c_out, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through CIB2.
+        
+        Args:
+            x: List of 2 tensors [p2, p3]
+        
+        Returns:
+            Enhanced P2 feature with P3 context
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            p2, p3 = x
+        else:
+            raise ValueError(f"CIB2 expects list of 2 tensors [p2, p3], got {type(x)}")
+        
+        # Upsample P3 2x
+        p3_up = self.upsample(p3)
+        # Match channels
+        p3_up = self.conv_p3(p3_up)
+        # Concat [P2, P3_up]
+        x = torch.cat([p2, p3_up], dim=1)
+        # Conv 3x3 stride=1
+        x = self.conv1(x)
+        # MaxPool 3x3 stride=1 padding=1
+        x = self.maxpool(x)
+        # Conv 3x3 stride=1
+        x = self.conv2(x)
+        # Conv 1x1
+        x = self.conv_out(x)
+        return x

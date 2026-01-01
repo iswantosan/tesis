@@ -85,6 +85,12 @@ from ultralytics.nn.modules import (
     SOP,
     FA,
     ASFF,
+    SOFP,
+    HRDE,
+    MDA,
+    DSOB,
+    EAE,
+    CIB2,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1139,6 +1145,34 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c2, c3, c4, c_out, target_scale]
             else:
                 raise ValueError(f"ASFF expects list of 3 layer indices in 'from', got {f}")
+        elif m is SOFP:
+            # SOFP receives 2 inputs: [neck_output, p2_backbone]
+            # Args: [c2, c_p2] where c2 is output channels, c_p2 is P2 backbone channels
+            # Input channels are auto-inferred from f (list of 2 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c1 = ch[f[0]]  # Neck output channels
+                c_p2 = ch[f[1]]  # P2 backbone channels
+                c2 = args[0] if args else c_p2  # Output channels (default: P2 channels)
+                if c2 != nc:
+                    c2 = make_divisible(min(c2, max_channels) * width, 8)
+                c_p2_arg = args[1] if len(args) > 1 else c_p2  # P2 channels (can override)
+                args = [c1, c2, c_p2_arg]
+            else:
+                raise ValueError(f"SOFP expects list of 2 layer indices in 'from', got {f}")
+        elif m is CIB2:
+            # CIB2 receives 2 inputs: [p2, p3]
+            # Args: [c_out, c_p3] where c_out is output channels, c_p3 is P3 channels (can be inferred)
+            # Input channels are auto-inferred from f (list of 2 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c_p2 = ch[f[0]]  # P2 channels
+                c_p3 = ch[f[1]]  # P3 channels
+                c_out = args[0] if args else c_p2  # Output channels (default: P2 channels)
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                c_p3_arg = args[1] if len(args) > 1 else c_p3  # P3 channels (can override)
+                args = [c_p2, c_p3_arg, c_out]
+            else:
+                raise ValueError(f"CIB2 expects list of 2 layer indices in 'from', got {f}")
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:

@@ -1,5 +1,6 @@
 # YOLOv12-FA 🚀, AGPL-3.0 license
 # YOLOv12 object detection model with P3-P5 outputs and Feature Amplification (FA) Block
+# Plus 6 new small object detection blocks: SOFP, HRDE, MDA, DSOB, EAE, CIB2
 # For Usage examples see https://docs.ultralytics.com/tasks/detect
 
 # Parameters
@@ -18,32 +19,36 @@ backbone:
   # [from, repeats, module, args]
   - [-1, 1, Conv,  [64, 3, 2]] # 0-P1/2
   - [-1, 1, Conv,  [128, 3, 2, 1, 2]] # 1-P2/4
-  - [-1, 2, C3k2,  [256, False, 0.25]]
-  - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 3-P3/8
-  - [-1, 2, C3k2,  [512, False, 0.25]]
-  - [-1, 1, Conv,  [512, 3, 2]] # 5-P4/16
-  - [-1, 4, A2C2f, [512, True, 4]]
-  - [-1, 1, Conv,  [1024, 3, 2]] # 7-P5/32
-  - [-1, 4, A2C2f, [1024, True, 1]] # 8
+  - [-1, 1, HRDE,  [256]] # 2 HRDE Block: High-Res Detail Extractor (after stem, before first C2f)
+  - [-1, 2, C3k2,  [256, False, 0.25]] # 3
+  - [-1, 1, EAE,   [256]] # 4 EAE Block: Edge-Aware Enhancement (after first C2f)
+  - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 5-P3/8
+  - [-1, 2, C3k2,  [512, False, 0.25]] # 6
+  - [-1, 1, Conv,  [512, 3, 2]] # 7-P4/16
+  - [-1, 4, A2C2f, [512, True, 4]] # 8
+  - [-1, 1, Conv,  [1024, 3, 2]] # 9-P5/32
+  - [-1, 4, A2C2f, [1024, True, 1]] # 10
 
-# YOLO12-turbo head with FA Block
+# YOLO12-turbo head with FA Block and new blocks
 head:
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
-  - [-1, 2, A2C2f, [512, False, -1]] # 11
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 11
+  - [[-1, 8], 1, Concat, [1]] # 12 cat backbone P4
+  - [-1, 2, A2C2f, [512, False, -1]] # 13
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 1, FA, [256]] # FA Block: Feature Amplification after P2 feature fusion
-  - [-1, 2, A2C2f, [256, False, -1]] # 14
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14
+  - [-1, 1, MDA, [256]] # 15 MDA Block: Multi-Dilation Aggregator (in FPN path P3→P2)
+  - [[-1, 6], 1, CIB2, [256, 512]] # 16 CIB2 Block: Context Injection (lateral connection P3→P2, takes [upsampled_p4, p3_backbone], args: [c_out, c_p3])
+  - [[-1, 4], 1, SOFP, [256, 256]] # 17 SOFP Block: Small Object Feature Pyramid (before P2 detection head, takes [neck_output, p2_backbone], args: [c2, c_p2])
+  - [-1, 1, DSOB, [256]] # 18 DSOB Block: Dense Small Object Block (replace Conv sequence before final detection, args: [c2])
+  - [-1, 1, FA, [256]] # 19 FA Block: Feature Amplification after P2 feature fusion
+  - [-1, 2, A2C2f, [256, False, -1]] # 20
 
-  - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 11], 1, Concat, [1]] # cat head P4
-  - [-1, 2, A2C2f, [512, False, -1]] # 17
+  - [-1, 1, Conv, [256, 3, 2]] # 21
+  - [[-1, 13], 1, Concat, [1]] # 22 cat head P4
+  - [-1, 2, A2C2f, [512, False, -1]] # 23
 
-  - [-1, 1, Conv, [512, 3, 2]]
-  - [[-1, 8], 1, Concat, [1]] # cat head P5
-  - [-1, 2, C3k2, [1024, True]] # 20 (P5/32-large)
+  - [-1, 1, Conv, [512, 3, 2]] # 24
+  - [[-1, 10], 1, Concat, [1]] # 25 cat head P5
+  - [-1, 2, C3k2, [1024, True]] # 26 (P5/32-large)
 
-  - [[14, 17, 20], 1, Detect, [nc]] # Detect(P3, P4, P5)
-
+  - [[20, 23, 26], 1, Detect, [nc]] # Detect(P3, P4, P5)
