@@ -2488,6 +2488,121 @@ class FA(nn.Module):
         return x
 
 
+class ASFF(nn.Module):
+    """
+    Adaptive Spatial Feature Fusion (ASFF) Block for multi-scale feature fusion.
+    
+    Allows each scale to "borrow" information from other scales adaptively.
+    Focuses on small objects by allowing P3 to use details from P2.
+    
+    Architecture (for P3 output):
+    - Resize P2 to P3 size (downsample)
+    - Keep P3 original
+    - Resize P4 to P3 size (upsample)
+    - Concat all aligned features
+    - 1×1 gate (generate adaptive weights per-pixel)
+    - Weighted sum
+    - Conv for final fusion
+    
+    Args:
+        c2 (int): P2 channels
+        c3 (int): P3 channels
+        c4 (int): P4 channels
+        c_out (int): Output channels (default: same as P3)
+        target_scale (str): Target scale for output ('P2', 'P3', or 'P4', default: 'P3')
+    """
+    
+    def __init__(self, c2, c3, c4, c_out=None, target_scale='P3'):
+        """Initialize ASFF for adaptive spatial feature fusion."""
+        super().__init__()
+        from .conv import Conv
+        
+        self.target_scale = target_scale
+        
+        # Determine output channels
+        if c_out is None:
+            c_out = c3  # Default to P3 channels
+        
+        # Align channels: all features should have same channels for fusion
+        # Use P3 channels as reference
+        self.align_p2 = Conv(c2, c3, k=1, s=1, act=True) if c2 != c3 else nn.Identity()
+        self.align_p3 = nn.Identity()  # P3 stays as is
+        self.align_p4 = Conv(c4, c3, k=1, s=1, act=True) if c4 != c3 else nn.Identity()
+        
+        # After concat: 3 * c3 channels
+        c_concat = 3 * c3
+        
+        # 1×1 gate (generate adaptive weights per-pixel)
+        # Output 3 weights (one for each scale: P2, P3, P4)
+        self.gate_conv = Conv(c_concat, 3, k=1, s=1, act=False)
+        self.softmax = nn.Softmax(dim=1)
+        
+        # Final conv for fusion
+        self.conv_out = Conv(c3, c_out, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through ASFF.
+        
+        Args:
+            x: List of 3 tensors [P2, P3, P4]
+        
+        Process:
+        1. Resize P2 and P4 to P3 size
+        2. Align channels
+        3. Concat
+        4. Generate adaptive weights (gate)
+        5. Weighted sum
+        6. Final conv
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 3:
+            p2, p3, p4 = x
+        else:
+            raise ValueError(f"ASFF expects list of 3 tensors [P2, P3, P4], got {type(x)}")
+        
+        # Get target spatial size (P3 size)
+        _, _, h3, w3 = p3.shape
+        
+        # Resize P2 to P3 size (downsample if needed)
+        if p2.shape[2:] != (h3, w3):
+            p2_resized = F.interpolate(p2, size=(h3, w3), mode='bilinear', align_corners=False)
+        else:
+            p2_resized = p2
+        
+        # P3 stays original
+        p3_original = p3
+        
+        # Resize P4 to P3 size (upsample)
+        if p4.shape[2:] != (h3, w3):
+            p4_resized = F.interpolate(p4, size=(h3, w3), mode='bilinear', align_corners=False)
+        else:
+            p4_resized = p4
+        
+        # Align channels
+        p2_aligned = self.align_p2(p2_resized) if isinstance(self.align_p2, Conv) else p2_resized
+        p3_aligned = p3_original
+        p4_aligned = self.align_p4(p4_resized) if isinstance(self.align_p4, Conv) else p4_resized
+        
+        # Concat all aligned features
+        x_concat = torch.cat([p2_aligned, p3_aligned, p4_aligned], dim=1)  # [B, 3*C, H, W]
+        
+        # 1×1 gate (generate adaptive weights per-pixel)
+        weights = self.gate_conv(x_concat)  # [B, 3, H, W]
+        weights = self.softmax(weights)  # [B, 3, H, W] - normalized weights
+        
+        # Weighted sum: w1*P2 + w2*P3 + w3*P4
+        w1 = weights[:, 0:1, :, :]  # [B, 1, H, W]
+        w2 = weights[:, 1:2, :, :]
+        w3 = weights[:, 2:3, :, :]
+        
+        x = w1 * p2_aligned + w2 * p3_aligned + w3 * p4_aligned
+        
+        # Final conv for fusion
+        x = self.conv_out(x)
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.

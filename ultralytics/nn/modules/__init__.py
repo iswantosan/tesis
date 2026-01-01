@@ -73,6 +73,7 @@ from .block import (
     ARF,
     SOP,
     FA,
+    ASFF,
 )
 from .conv import (
     CBAM,
