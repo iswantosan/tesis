@@ -80,6 +80,12 @@ from .block import (
     DSOB,
     EAE,
     CIB2,
+    TEB,
+    FDB,
+    SACB,
+    FBSB,
+    FDEB,
+    DPRB,
 )
 from .conv import (
     CBAM,
@@ -207,4 +213,10 @@ __all__ = (
     "DSOB",
     "EAE",
     "CIB2",
+    "TEB",
+    "FDB",
+    "SACB",
+    "FBSB",
+    "FDEB",
+    "DPRB",
 )

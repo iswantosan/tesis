@@ -61,6 +61,12 @@ __all__ = (
     "DSOB",
     "EAE",
     "CIB2",
+    "TEB",
+    "FDB",
+    "SACB",
+    "FBSB",
+    "FDEB",
+    "DPRB",
 )
 
 
@@ -3131,4 +3137,351 @@ class CIB2(nn.Module):
         x = self.conv2(x)
         # Conv 1x1
         x = self.conv_out(x)
+        return x
+
+
+class TEB(nn.Module):
+    """
+    Texture Enhancement Block for enhancing high-frequency details for AFB detection.
+    
+    Architecture:
+    - Laplacian filter/edge detection branch
+    - Original feature branch
+    - Weighted fusion (learnable)
+    - Conv 1x1 projection
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize TEB for texture enhancement."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Laplacian filter for edge detection (fixed weight)
+        # Laplacian kernel: [[0, -1, 0], [-1, 4, -1], [0, -1, 0]]
+        laplacian = torch.tensor([[0, -1, 0], [-1, 4, -1], [0, -1, 0]], dtype=torch.float32).view(1, 1, 3, 3)
+        # Register as buffer (not trainable parameter)
+        self.register_buffer('laplacian', laplacian.repeat(c1, 1, 1, 1))
+        
+        # Edge detection branch: Conv 1x1 on edge features
+        self.conv_edge = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Original feature branch: Conv 1x1
+        self.conv_original = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Weighted fusion (learnable weights)
+        # Generate fusion weights using 1x1 conv + sigmoid
+        self.fusion_conv = Conv(c1 * 2, 2, k=1, s=1, act=False)  # Output 2 weights
+        self.softmax = nn.Softmax(dim=1)
+        
+        # Conv 1x1 projection
+        self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through TEB."""
+        # Laplacian filter/edge detection branch
+        edge_features = F.conv2d(x, self.laplacian, padding=1, groups=x.shape[1])
+        edge_features = torch.abs(edge_features)  # Absolute value for edge magnitude
+        edge_branch = self.conv_edge(edge_features)
+        
+        # Original feature branch
+        original_branch = self.conv_original(x)
+        
+        # Concat for weighted fusion
+        concat_features = torch.cat([edge_branch, original_branch], dim=1)
+        
+        # Generate learnable weights
+        weights = self.fusion_conv(concat_features)  # [B, 2, H, W]
+        weights = self.softmax(weights)  # Normalize weights
+        
+        # Weighted fusion
+        w_edge = weights[:, 0:1, :, :]  # [B, 1, H, W]
+        w_original = weights[:, 1:2, :, :]  # [B, 1, H, W]
+        
+        fused = w_edge * edge_branch + w_original * original_branch
+        
+        # Conv 1x1 projection
+        x = self.conv_out(fused)
+        return x
+
+
+class FDB(nn.Module):
+    """
+    Feature Decoupling Block for separating semantic vs localization features.
+    
+    Architecture:
+    - Dual pathway: semantic branch (Conv 3x3 dilation=2) + localization branch (Conv 3x3 stride=1)
+    - Cross-fusion antara kedua branch
+    - Concatenate output
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FDB for feature decoupling."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_mid = c1 // 2
+        
+        # Semantic branch: Conv 3x3 dilation=2
+        self.semantic_conv = Conv(c1, c_mid, k=3, s=1, d=2, act=True)
+        
+        # Localization branch: Conv 3x3 stride=1
+        self.localization_conv = Conv(c1, c_mid, k=3, s=1, act=True)
+        
+        # Cross-fusion: each branch processes the other's output
+        self.semantic_fusion = Conv(c_mid, c_mid, k=1, s=1, act=True)
+        self.localization_fusion = Conv(c_mid, c_mid, k=1, s=1, act=True)
+        
+        # Final output: concatenate both branches
+        self.conv_out = Conv(c_mid * 2, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through FDB."""
+        # Dual pathway
+        semantic = self.semantic_conv(x)  # Semantic branch
+        localization = self.localization_conv(x)  # Localization branch
+        
+        # Cross-fusion
+        semantic_fused = self.semantic_fusion(localization) + semantic
+        localization_fused = self.localization_fusion(semantic) + localization
+        
+        # Concatenate output
+        x = torch.cat([semantic_fused, localization_fused], dim=1)
+        x = self.conv_out(x)
+        return x
+
+
+class SACB(nn.Module):
+    """
+    Scale-Aware Convolution Block for adaptive kernel size based on feature statistics.
+    
+    Architecture:
+    - Compute spatial variance/mean per channel
+    - Generate kernel size weights (small object → larger kernel)
+    - Apply multi-kernel conv with learned weights
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize SACB for scale-aware convolution."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Multi-kernel convolutions (3x3, 5x5, 7x7)
+        self.conv3 = Conv(c1, c2, k=3, s=1, act=True)
+        self.conv5 = Conv(c1, c2, k=5, s=1, act=True)
+        self.conv7 = Conv(c1, c2, k=7, s=1, act=True)
+        
+        # Weight generation: compute statistics and generate weights
+        self.stat_conv = Conv(c1, c1, k=1, s=1, act=True)
+        self.weight_conv = Conv(c1, 3, k=1, s=1, act=False)  # Output 3 weights for 3 kernels
+        self.softmax = nn.Softmax(dim=1)
+        
+    def forward(self, x):
+        """Forward pass through SACB."""
+        B, C, H, W = x.shape
+        
+        # Compute spatial variance/mean per channel
+        # Mean per channel: [B, C, 1, 1]
+        mean = x.mean(dim=[2, 3], keepdim=True)
+        # Variance per channel: [B, C, 1, 1]
+        variance = ((x - mean) ** 2).mean(dim=[2, 3], keepdim=True)
+        
+        # Combine mean and variance for statistics
+        stats = self.stat_conv(torch.cat([mean, variance], dim=1))
+        
+        # Generate kernel size weights (small object → larger kernel)
+        # Higher variance/mean → smaller objects → use larger kernel
+        weights = self.weight_conv(stats)  # [B, 3, 1, 1]
+        weights = self.softmax(weights)
+        
+        # Apply multi-kernel conv
+        out3 = self.conv3(x)  # 3x3 kernel
+        out5 = self.conv5(x)  # 5x5 kernel
+        out7 = self.conv7(x)  # 7x7 kernel
+        
+        # Weighted combination
+        w3 = weights[:, 0:1, :, :]
+        w5 = weights[:, 1:2, :, :]
+        w7 = weights[:, 2:3, :, :]
+        
+        x = w3 * out3 + w5 * out5 + w7 * out7
+        return x
+
+
+class FBSB(nn.Module):
+    """
+    Foreground-Background Separation Block for explicit FG/BG modeling.
+    
+    Architecture:
+    - Generate attention mask (sigmoid(Conv 1x1))
+    - Foreground stream: features * mask
+    - Background stream: features * (1-mask)
+    - Process separately, concat
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FBSB for foreground-background separation."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Generate attention mask
+        self.mask_conv = Conv(c1, 1, k=1, s=1, act=False)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Foreground stream processing
+        self.fg_conv = Conv(c1, c2 // 2, k=3, s=1, act=True)
+        
+        # Background stream processing
+        self.bg_conv = Conv(c1, c2 // 2, k=3, s=1, act=True)
+        
+        # Final fusion
+        self.conv_out = Conv(c2, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through FBSB."""
+        # Generate attention mask
+        mask = self.sigmoid(self.mask_conv(x))  # [B, 1, H, W]
+        
+        # Foreground stream: features * mask
+        fg_features = x * mask
+        fg_out = self.fg_conv(fg_features)
+        
+        # Background stream: features * (1-mask)
+        bg_features = x * (1 - mask)
+        bg_out = self.bg_conv(bg_features)
+        
+        # Concat and final processing
+        x = torch.cat([fg_out, bg_out], dim=1)
+        x = self.conv_out(x)
+        return x
+
+
+class FDEB(nn.Module):
+    """
+    Frequency Domain Enhancement Block for FFT-based high-frequency boost.
+    
+    Architecture:
+    - FFT transform
+    - Amplify high-frequency components
+    - IFFT back
+    - Residual add dengan original
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize FDEB for frequency domain enhancement."""
+        super().__init__()
+        from .conv import Conv
+        
+        self.use_residual = (c1 == c2)
+        
+        # Learnable high-frequency amplification
+        self.amp_conv = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Final projection
+        self.conv_out = Conv(c1, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through FDEB."""
+        identity = x
+        B, C, H, W = x.shape
+        
+        # FFT transform (apply to each channel separately)
+        x_fft = torch.fft.rfft2(x, norm='ortho')  # [B, C, H, W//2+1] complex
+        
+        # Separate real and imaginary parts
+        x_fft_real = x_fft.real
+        x_fft_imag = x_fft.imag
+        
+        # Concatenate real and imaginary for processing
+        x_fft_concat = torch.cat([x_fft_real, x_fft_imag], dim=1)  # [B, 2*C, H, W//2+1]
+        
+        # Amplify high-frequency components (learnable)
+        # Reshape for conv processing
+        x_fft_reshaped = x_fft_concat.view(B, 2*C, H, W//2+1)
+        # Use 1x1 conv for amplification (simplified, full impl would use frequency-specific weights)
+        x_fft_amp = self.amp_conv(x_fft_reshaped)
+        
+        # Split back
+        x_fft_amp_real = x_fft_amp[:, :C, :, :]
+        x_fft_amp_imag = x_fft_amp[:, C:, :, :]
+        
+        # Reconstruct complex tensor
+        x_fft_enhanced = torch.complex(x_fft_amp_real, x_fft_amp_imag)
+        
+        # IFFT back
+        x_enhanced = torch.fft.irfft2(x_fft_enhanced, s=(H, W), norm='ortho')
+        
+        # Residual add dengan original
+        if self.use_residual:
+            x_enhanced = x_enhanced + identity
+        
+        # Final projection
+        x = self.conv_out(x_enhanced)
+        return x
+
+
+class DPRB(nn.Module):
+    """
+    Dense Prediction Refinement Block for extra dense conv layers untuk P2.
+    
+    Architecture:
+    - Conv 3x3 → Conv 3x3 → Conv 3x3 (3 cascade)
+    - Dense connections (connect all to all)
+    - Bottleneck di akhir
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize DPRB for dense prediction refinement."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_mid = c2 // 2
+        
+        # 3 cascade conv layers
+        self.conv1 = Conv(c1, c_mid, k=3, s=1, act=True)
+        self.conv2 = Conv(c1 + c_mid, c_mid, k=3, s=1, act=True)  # Dense: input + conv1 output
+        self.conv3 = Conv(c1 + c_mid + c_mid, c_mid, k=3, s=1, act=True)  # Dense: input + conv1 + conv2
+        
+        # Bottleneck di akhir
+        self.conv_bottleneck = Conv(c1 + c_mid * 3, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """Forward pass through DPRB."""
+        identity = x
+        
+        # Conv 3x3 cascade with dense connections
+        f1 = self.conv1(x)
+        x1 = torch.cat([identity, f1], dim=1)  # Dense connection
+        
+        f2 = self.conv2(x1)
+        x2 = torch.cat([identity, f1, f2], dim=1)  # Dense connection
+        
+        f3 = self.conv3(x2)
+        x3 = torch.cat([identity, f1, f2, f3], dim=1)  # Dense connection
+        
+        # Bottleneck di akhir
+        x = self.conv_bottleneck(x3)
         return x
