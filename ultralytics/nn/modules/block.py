@@ -2820,10 +2820,18 @@ class SOFP(nn.Module):
         self.conv2 = Conv(c1, c1, k=3, s=1, act=True)
         # Upsample 2x (bilinear)
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        # Conv 1x1
+        # Conv 1x1 to reduce to c_p2 channels
         self.conv_reduce = Conv(c1, c_p2, k=1, s=1, act=True)
+        # Channel alignment for P2 - create with max possible channels to handle width scaling
+        # We'll use a flexible approach: create alignment that can handle variable input
+        # Store expected c_p2, but allow dynamic adjustment
+        self.c_p2 = c_p2
+        # Create a module dict for dynamic channel alignment (will be populated in forward if needed)
+        self.conv_p2_align_dict = nn.ModuleDict()
         # Conv 3x3 stride=1 (after concat, input will be c_p2*2)
-        self.conv_out = Conv(c_p2 * 2, c2, k=3, s=1, act=True)
+        # We'll handle this dynamically in forward to account for actual channel counts
+        self.conv_out_dict = nn.ModuleDict()
+        self.c2 = c2
         
     def forward(self, x):
         """
@@ -2845,12 +2853,31 @@ class SOFP(nn.Module):
         x = self.conv2(x)
         # Upsample 2x
         x = self.upsample(x)
-        # Reduce channels
+        # Reduce channels to match expected c_p2
         x = self.conv_reduce(x)
+        
+        # Align P2 channels if needed (in case actual P2 channels differ from expected c_p2)
+        _, c_p2_actual, _, _ = p2.shape
+        if c_p2_actual != self.c_p2:
+            # Create or get alignment conv for this channel count
+            align_key = str(c_p2_actual)
+            if align_key not in self.conv_p2_align_dict:
+                from .conv import Conv
+                self.conv_p2_align_dict[align_key] = Conv(c_p2_actual, self.c_p2, k=1, s=1, act=True)
+            p2 = self.conv_p2_align_dict[align_key](p2)
+        
         # Concat with backbone P2
         x = torch.cat([x, p2], dim=1)
+        
+        # Get actual concat channel count and create/get appropriate conv_out
+        _, c_concat, _, _ = x.shape
+        concat_key = str(c_concat)
+        if concat_key not in self.conv_out_dict:
+            from .conv import Conv
+            self.conv_out_dict[concat_key] = Conv(c_concat, self.c2, k=3, s=1, act=True)
+        
         # Final conv
-        x = self.conv_out(x)
+        x = self.conv_out_dict[concat_key](x)
         return x
 
 
