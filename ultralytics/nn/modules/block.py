@@ -1823,6 +1823,97 @@ class USF(nn.Module):
         return x
 
 
+class MSA(nn.Module):
+    """
+    Multi-Scale Attention Block (MSA) for enhanced multi-scale feature extraction.
+    
+    Combines multi-scale convolution with spatial attention to capture features
+    at different receptive fields simultaneously.
+    
+    Architecture:
+    - Conv 1×1 (channel reduction)
+    - Parallel branches with different dilations:
+      * Conv 3×3 dilation=1 (local features)
+      * Conv 3×3 dilation=2 (medium-range features)
+      * Conv 3×3 dilation=3 (long-range features)
+    - Concat all branches
+    - Spatial Attention (Conv 7×7)
+    - Conv 1×1 (channel fusion)
+    
+    Why suitable for small objects:
+    - Multi-scale receptive fields capture objects at different scales
+    - Spatial attention emphasizes important spatial locations
+    - Parallel processing maintains efficiency
+    - Effective for objects with varying sizes
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        reduction_ratio (int): Channel reduction ratio for parallel branches (default: 4)
+                              Reduced channels = c1 // reduction_ratio
+    """
+    
+    def __init__(self, c1, c2, reduction_ratio=4):
+        """Initialize MSA for multi-scale feature extraction with spatial attention."""
+        super().__init__()
+        from .conv import Conv, SpatialAttention
+        
+        # Channel reduction for parallel branches
+        c_reduced = max(c1 // reduction_ratio, 1)  # Ensure at least 1 channel
+        
+        # Conv 1×1 (channel reduction)
+        self.conv_reduce = Conv(c1, c_reduced, k=1, s=1, act=True)
+        
+        # Parallel branches with different dilations
+        # Branch 1: Conv 3×3 dilation=1 (local features)
+        self.branch1 = Conv(c_reduced, c_reduced, k=3, s=1, d=1, act=True)
+        
+        # Branch 2: Conv 3×3 dilation=2 (medium-range features)
+        self.branch2 = Conv(c_reduced, c_reduced, k=3, s=1, d=2, act=True)
+        
+        # Branch 3: Conv 3×3 dilation=3 (long-range features)
+        self.branch3 = Conv(c_reduced, c_reduced, k=3, s=1, d=3, act=True)
+        
+        # After concat, total channels = 3 * c_reduced
+        c_concat = 3 * c_reduced
+        
+        # Spatial Attention (Conv 7×7)
+        self.spatial_attn = SpatialAttention(kernel_size=7)
+        
+        # Conv 1×1 (channel fusion to output channels)
+        self.conv_fusion = Conv(c_concat, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through MSA.
+        
+        Process:
+        1. Channel reduction with Conv1×1
+        2. Process through 3 parallel branches (dilation 1, 2, 3)
+        3. Concat all branches
+        4. Apply spatial attention
+        5. Channel fusion with Conv1×1
+        """
+        # Channel reduction
+        x_reduced = self.conv_reduce(x)
+        
+        # Parallel branches
+        branch1 = self.branch1(x_reduced)  # dilation=1
+        branch2 = self.branch2(x_reduced)  # dilation=2
+        branch3 = self.branch3(x_reduced)  # dilation=3
+        
+        # Concat all branches
+        x = torch.cat([branch1, branch2, branch3], dim=1)
+        
+        # Spatial attention
+        x = self.spatial_attn(x)
+        
+        # Channel fusion
+        x = self.conv_fusion(x)
+        
+        return x
+
+
 class RFCBAM(nn.Module):
     """
     Receptive Field Channel and Spatial Attention Module (RFCBAM) for SOD-YOLO.

@@ -65,6 +65,7 @@ from .block import (
     BFB,
     EGB,
     USF,
+    MSA,
 )
 from .conv import (
     CBAM,
@@ -177,4 +178,5 @@ __all__ = (
     "BFB",
     "EGB",
     "USF",
+    "MSA",
 )
