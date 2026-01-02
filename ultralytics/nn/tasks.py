@@ -107,6 +107,9 @@ from ultralytics.nn.modules import (
     RPP,
     FDEB,
     DPRB,
+    CoordinateAttention,
+    SimAM,
+    ConvNeXtBlock,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1274,6 +1277,28 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             else:
                 args = [c1, *args]  # channels, scale_factor
             c2 = c1  # Output channels same as input
+        elif m is CoordinateAttention:
+            # CoordinateAttention needs (c1, c2) where c1 is input and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            reduction = args[1] if len(args) > 1 else 32  # Reduction ratio
+            args = [c1, c2, reduction]
+        elif m is SimAM:
+            # SimAM is parameter-free, just needs c1 for compatibility
+            c1 = ch[f]  # Input channels (for compatibility)
+            e_lambda = args[0] if args else 1e-4  # Lambda parameter
+            args = [c1, c1, e_lambda]  # c1, c2 (same), e_lambda
+        elif m is ConvNeXtBlock:
+            # ConvNeXtBlock needs (c1, c2) where c1 is input and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            expansion = args[1] if len(args) > 1 else 4  # Expansion ratio
+            kernel_size = args[2] if len(args) > 2 else 7  # Kernel size
+            args = [c1, c2, expansion, kernel_size]
         elif m is CBFuse:
             c2 = ch[f[-1]]
         else:

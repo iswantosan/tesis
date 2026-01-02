@@ -67,6 +67,9 @@ __all__ = (
     "FBSB",
     "FDEB",
     "DPRB",
+    "CoordinateAttention",
+    "SimAM",
+    "ConvNeXtBlock",
 )
 
 
@@ -4168,4 +4171,209 @@ class DPRB(nn.Module):
         
         # Bottleneck di akhir
         x = self.conv_bottleneck(x3)
+        return x
+
+
+class CoordinateAttention(nn.Module):
+    """
+    Coordinate Attention for position-aware attention.
+    Paper: Coordinate Attention for Efficient Mobile Network Design (CVPR 2021)
+    
+    Architecture:
+    - X AvgPool (H dimension) -> [B, C, 1, W]
+    - Y AvgPool (W dimension) -> [B, C, H, 1]
+    - Concat -> Conv -> Split back
+    - Apply X attention and Y attention
+    - Multiply with features
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        reduction (int): Reduction ratio for intermediate channels (default: 32)
+    """
+    
+    def __init__(self, c1, c2=None, reduction=32):
+        """Initialize Coordinate Attention."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Intermediate channels after reduction
+        c_mid = max(8, c1 // reduction)
+        
+        # X-direction pooling (H dimension)
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        # Y-direction pooling (W dimension)
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        
+        # Shared conv for both directions
+        self.conv1 = Conv(c1, c_mid, k=1, s=1, act=True)
+        
+        # Separate convs for X and Y
+        self.conv_h = Conv(c_mid, c2, k=1, s=1, act=False)
+        self.conv_w = Conv(c_mid, c2, k=1, s=1, act=False)
+        
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """
+        Forward pass through Coordinate Attention.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with coordinate attention
+        """
+        identity = x
+        B, C, H, W = x.shape
+        
+        # X-direction: [B, C, H, W] -> [B, C, H, 1]
+        x_h = self.pool_h(x)  # [B, C, H, 1]
+        
+        # Y-direction: [B, C, H, W] -> [B, C, 1, W]
+        x_w = self.pool_w(x)  # [B, C, 1, W]
+        
+        # Concat along spatial dimension: [B, C, H, 1] -> [B, C, 1, H] then concat with [B, C, 1, W]
+        x_h = x_h.permute(0, 1, 3, 2)  # [B, C, 1, H]
+        x_cat = torch.cat([x_h, x_w], dim=3)  # [B, C, 1, H+W]
+        
+        # Shared conv: [B, C, 1, H+W] -> [B, c_mid, 1, H+W]
+        x_cat = self.conv1(x_cat)  # [B, c_mid, 1, H+W]
+        
+        # Split back: [B, c_mid, 1, H+W] -> [B, c_mid, 1, H] and [B, c_mid, 1, W]
+        x_h, x_w = torch.split(x_cat, [H, W], dim=3)
+        x_h = x_h.permute(0, 1, 3, 2)  # [B, c_mid, H, 1]
+        x_w = x_w  # [B, c_mid, 1, W]
+        
+        # Separate convs
+        att_h = self.sigmoid(self.conv_h(x_h))  # [B, C, H, 1]
+        att_w = self.sigmoid(self.conv_w(x_w))  # [B, C, 1, W]
+        
+        # Apply attention
+        out = identity * att_h * att_w
+        return out
+
+
+class SimAM(nn.Module):
+    """
+    SimAM: A Simple, Parameter-Free Attention Module (ICCV 2021)
+    Parameter-free attention mechanism based on energy function.
+    
+    Architecture:
+    E = (feature - mean)^2 / (variance + lambda)
+    Attention = 1 / (1 + E)
+    Multiply with original features
+    
+    Args:
+        c1 (int): Input channels (for compatibility, not used)
+        c2 (int): Output channels (for compatibility, not used)
+        e_lambda (float): Lambda parameter for energy function (default: 1e-4)
+    """
+    
+    def __init__(self, c1=None, c2=None, e_lambda=1e-4):
+        """Initialize SimAM attention (parameter-free)."""
+        super().__init__()
+        self.activaton = nn.Sigmoid()
+        self.e_lambda = e_lambda
+        
+    def forward(self, x):
+        """
+        Forward pass through SimAM.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with SimAM attention
+        """
+        B, C, H, W = x.shape
+        
+        # Spatial mean: [B, C, H, W] -> [B, C, 1, 1]
+        n = W * H - 1
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+        
+        # Return attended features
+        return x * self.activaton(y)
+
+
+class ConvNeXtBlock(nn.Module):
+    """
+    ConvNeXt Block: A Modern Conv Block (CVPR 2022)
+    Based on ConvNeXt architecture with modern design choices.
+    
+    Architecture:
+    - DWConv 7x7
+    - LayerNorm
+    - Conv 1x1 (expand 4x)
+    - GELU
+    - Conv 1x1 (project back)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        expansion (int): Expansion ratio (default: 4)
+        kernel_size (int): Kernel size for depthwise conv (default: 7)
+    """
+    
+    def __init__(self, c1, c2=None, expansion=4, kernel_size=7):
+        """Initialize ConvNeXt Block."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        c_mid = c1 * expansion
+        
+        # Depthwise Conv 7x7
+        self.dwconv = DWConv(c1, c1, k=kernel_size, s=1, act=False)
+        
+        # LayerNorm (applied per channel)
+        self.norm = nn.LayerNorm(c1)
+        
+        # Pointwise Conv 1x1 (expand)
+        self.pwconv1 = Conv(c1, c_mid, k=1, s=1, act=False)
+        
+        # GELU activation
+        self.act = nn.GELU()
+        
+        # Pointwise Conv 1x1 (project)
+        self.pwconv2 = Conv(c_mid, c2, k=1, s=1, act=False)
+        
+    def forward(self, x):
+        """
+        Forward pass through ConvNeXt Block.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Processed features
+        """
+        identity = x
+        
+        # DWConv 7x7
+        x = self.dwconv(x)
+        
+        # LayerNorm: [B, C, H, W] -> [B, H, W, C] -> norm -> [B, C, H, W]
+        B, C, H, W = x.shape
+        x = x.permute(0, 2, 3, 1)  # [B, H, W, C]
+        x = self.norm(x)
+        x = x.permute(0, 3, 1, 2)  # [B, C, H, W]
+        
+        # Pointwise expand
+        x = self.pwconv1(x)
+        x = self.act(x)
+        
+        # Pointwise project
+        x = self.pwconv2(x)
+        
+        # Residual connection (if same channels)
+        if identity.shape[1] == x.shape[1]:
+            x = x + identity
+        
         return x

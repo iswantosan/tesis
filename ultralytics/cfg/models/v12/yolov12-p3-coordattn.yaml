@@ -1,10 +1,11 @@
-# YOLOv12-CIB2 🚀, AGPL-3.0 license
-# YOLOv12 object detection model with P3-P5 outputs and Context Injection Block (CIB2)
+# YOLOv12-P3-CoordAttn 🚀, AGPL-3.0 license
+# YOLOv12 with Coordinate Attention for P3 enhancement
+# Position-aware attention for better small object localization
 # For Usage examples see https://docs.ultralytics.com/tasks/detect
 
 # Parameters
 nc: 1 # number of classes
-scales: # model compound scaling constants, i.e. 'model=yolov12n-cib2.yaml' will call yolov12-cib2.yaml with scale 'n'
+scales: # model compound scaling constants
   # [depth, width, max_channels]
   n: [0.50, 0.25, 1024]
   s: [0.50, 0.50, 1024]
@@ -26,7 +27,7 @@ backbone:
   - [-1, 1, Conv,  [1024, 3, 2]] # 7-P5/32
   - [-1, 4, A2C2f, [1024, True, 1]] # 8
 
-# YOLO12-turbo head with CIB2 Block
+# YOLO12-turbo head with Coordinate Attention
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 9
   - [[-1, 6], 1, Concat, [1]] # 10 cat backbone P4
@@ -35,7 +36,9 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 12
   - [[-1, 4], 1, Concat, [1]] # 13 cat backbone P3
   - [-1, 2, A2C2f, [256, False, -1]] # 14
-  - [[2, 14], 1, CIB2, [256]] # 15 CIB2 Block: Context Injection (inject P3 neck context into P2, takes [p2_backbone, p3_neck])
+  
+  # Coordinate Attention Block: Position-aware attention for P3
+  - [-1, 1, CoordinateAttention, [256]] # 15 CoordAttn: X/Y pooling + attention
   - [-1, 2, A2C2f, [256, False, -1]] # 16
 
   - [-1, 1, Conv, [256, 3, 2]] # 17
