@@ -96,6 +96,9 @@ from .block import (
     RPP,
     FDEB,
     DPRB,
+    CoordinateAttention,
+    SimAM,
+    ConvNeXtBlock,
 )
 from .conv import (
     CBAM,
@@ -239,4 +242,7 @@ __all__ = (
     "RPP",
     "FDEB",
     "DPRB",
+    "CoordinateAttention",
+    "SimAM",
+    "ConvNeXtBlock",
 )
