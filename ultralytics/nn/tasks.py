@@ -110,6 +110,10 @@ from ultralytics.nn.modules import (
     CoordinateAttention,
     SimAM,
     ConvNeXtBlock,
+    EdgePriorBlock,
+    LocalContextMixer,
+    TinyObjectAlignment,
+    AntiFPGate,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1299,6 +1303,35 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             expansion = args[1] if len(args) > 1 else 4  # Expansion ratio
             kernel_size = args[2] if len(args) > 2 else 7  # Kernel size
             args = [c1, c2, expansion, kernel_size]
+        elif m is EdgePriorBlock:
+            # EdgePriorBlock needs (c1, c2) where c1 is input and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            args = [c1, c2]
+        elif m is LocalContextMixer:
+            # LocalContextMixer needs (c1, c2) where c1 is input and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            args = [c1, c2]
+        elif m is TinyObjectAlignment:
+            # TinyObjectAlignment needs (c1, c2) where c1 is input and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            args = [c1, c2]
+        elif m is AntiFPGate:
+            # AntiFPGate needs (c1, c2) where c1 is input and c2 is output channels
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            use_simam = args[1] if len(args) > 1 else True  # Use SimAM or sigmoid
+            args = [c1, c2, use_simam]
         elif m is CBFuse:
             c2 = ch[f[-1]]
         else:

@@ -70,6 +70,10 @@ __all__ = (
     "CoordinateAttention",
     "SimAM",
     "ConvNeXtBlock",
+    "EdgePriorBlock",
+    "LocalContextMixer",
+    "TinyObjectAlignment",
+    "AntiFPGate",
 )
 
 
@@ -4375,5 +4379,279 @@ class ConvNeXtBlock(nn.Module):
         # Residual connection (if same channels)
         if identity.shape[1] == x.shape[1]:
             x = x + identity
+        
+        return x
+
+
+class EdgePriorBlock(nn.Module):
+    """
+    Edge-Prior Block: High-frequency edge/texture enhancement for small object detection.
+    Applies high-pass filter (HPF) via depthwise conv + gate mechanism.
+    
+    Architecture:
+    - Depthwise 3x3 (high-pass filter effect)
+    - Conv 1x1
+    - Sigmoid gate
+    - Residual: x_out = x + x * gate
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+    """
+    
+    def __init__(self, c1, c2=None):
+        """Initialize Edge-Prior Block."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Depthwise 3x3 for high-pass filter effect
+        # Using Laplacian-like kernel for edge detection
+        self.dwconv = DWConv(c1, c1, k=3, s=1, act=False)
+        
+        # Gate: 1x1 conv + sigmoid
+        self.gate = nn.Sequential(
+            Conv(c1, c1, k=1, s=1, act=False),
+            nn.Sigmoid()
+        )
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+        
+    def forward(self, x):
+        """
+        Forward pass through Edge-Prior Block.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with edge/texture prior
+        """
+        identity = x
+        
+        # High-pass filter effect via depthwise conv
+        x_hpf = self.dwconv(x)
+        
+        # Gate mechanism
+        gate = self.gate(x_hpf)
+        
+        # Residual: x + x * gate
+        x = identity + identity * gate
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        return x
+
+
+class LocalContextMixer(nn.Module):
+    """
+    Local Context Mixer: Multi-dilated depthwise conv for local context aggregation.
+    Captures multi-scale local context without losing detail.
+    
+    Architecture:
+    - Split channels into 3 groups (or use parallel branches)
+    - DWConv3x3 dilation=1
+    - DWConv3x3 dilation=2
+    - DWConv3x3 dilation=3
+    - Concat → 1x1 fuse → residual
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+    """
+    
+    def __init__(self, c1, c2=None):
+        """Initialize Local Context Mixer."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Multi-dilated depthwise convs
+        self.dwconv1 = DWConv(c1, c1, k=3, s=1, d=1, act=True)  # dilation=1
+        self.dwconv2 = DWConv(c1, c1, k=3, s=1, d=2, act=True)  # dilation=2
+        self.dwconv3 = DWConv(c1, c1, k=3, s=1, d=3, act=True)  # dilation=3
+        
+        # Fusion: 1x1 conv
+        self.fuse = Conv(c1 * 3, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through Local Context Mixer.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with multi-scale local context
+        """
+        identity = x
+        
+        # Multi-dilated branches
+        x1 = self.dwconv1(x)  # dilation=1: fine detail
+        x2 = self.dwconv2(x)  # dilation=2: medium context
+        x3 = self.dwconv3(x)  # dilation=3: wider context
+        
+        # Concat and fuse
+        x_cat = torch.cat([x1, x2, x3], dim=1)  # [B, 3C, H, W]
+        x = self.fuse(x_cat)  # [B, C, H, W]
+        
+        # Residual connection
+        if identity.shape[1] == x.shape[1]:
+            x = x + identity
+        
+        return x
+
+
+class TinyObjectAlignment(nn.Module):
+    """
+    Tiny-Object Alignment: Lightweight offset warp for alignment before concat.
+    Prevents misalignment during FPN upsample for tiny objects.
+    
+    Architecture:
+    - Offset prediction: Conv1x1(x_up) -> 2 channels (dx, dy)
+    - Grid sample with offset (or simple warp)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+    """
+    
+    def __init__(self, c1, c2=None):
+        """Initialize Tiny-Object Alignment."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Offset prediction: 2 channels for (dx, dy) per location
+        self.offset_conv = Conv(c1, 2, k=1, s=1, act=False)
+        
+        # Output projection
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+        
+    def forward(self, x):
+        """
+        Forward pass through Tiny-Object Alignment.
+        
+        Args:
+            x: Input tensor [B, C, H, W] (upsampled feature)
+        
+        Returns:
+            Aligned features
+        """
+        B, C, H, W = x.shape
+        
+        # Predict offset: [B, 2, H, W]
+        offset = self.offset_conv(x)
+        
+        # Normalize offset to [-1, 1] range for grid_sample
+        # Scale offset to reasonable range (e.g., ±2 pixels)
+        offset = offset * 0.1  # Small offset range
+        
+        # Create base grid: [B, H, W, 2] format for grid_sample
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(0, H, dtype=torch.float32, device=x.device),
+            torch.arange(0, W, dtype=torch.float32, device=x.device),
+            indexing='ij'
+        )
+        # Stack: [H, W, 2] where last dim is [x, y]
+        grid = torch.stack([grid_x, grid_y], dim=-1)  # [H, W, 2]
+        grid = grid.unsqueeze(0).repeat(B, 1, 1, 1)  # [B, H, W, 2]
+        
+        # Normalize grid to [-1, 1] range
+        grid = grid / torch.tensor([W - 1, H - 1], dtype=torch.float32, device=x.device) * 2.0 - 1.0
+        
+        # Apply offset: offset is [B, 2, H, W], need to permute to [B, H, W, 2]
+        offset_perm = offset.permute(0, 2, 3, 1)  # [B, H, W, 2]
+        # Normalize offset to grid space (scale by feature size)
+        offset_perm = offset_perm / torch.tensor([W, H], dtype=torch.float32, device=x.device) * 2.0
+        grid = grid + offset_perm * 0.1  # Small offset range
+        
+        # Grid sample: expects [B, H, W, 2] format
+        x_aligned = F.grid_sample(x, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        
+        # Project if needed
+        if self.proj is not None:
+            x_aligned = self.proj(x_aligned)
+        
+        return x_aligned
+
+
+class AntiFPGate(nn.Module):
+    """
+    Anti-FP Gate: Suppress background speckle/noise before prediction.
+    Prevents false positives from background noise that looks like small objects.
+    
+    Architecture:
+    - SimAM or sigmoid gate
+    - Residual: x = x * gate + x
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        use_simam (bool): Use SimAM or simple sigmoid gate (default: True)
+    """
+    
+    def __init__(self, c1, c2=None, use_simam=True):
+        """Initialize Anti-FP Gate."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.use_simam = use_simam
+        
+        if use_simam:
+            # Use SimAM for parameter-free attention
+            self.gate = SimAM(c1, c1, e_lambda=1e-4)
+        else:
+            # Simple sigmoid gate
+            self.gate = nn.Sequential(
+                Conv(c1, c1, k=1, s=1, act=False),
+                nn.Sigmoid()
+            )
+        
+        # Output projection if needed
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+        
+    def forward(self, x):
+        """
+        Forward pass through Anti-FP Gate.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with suppressed background noise
+        """
+        identity = x
+        
+        # Gate mechanism
+        gate = self.gate(x)
+        
+        # Residual: x * gate + x
+        x = identity * gate + identity
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
         
         return x

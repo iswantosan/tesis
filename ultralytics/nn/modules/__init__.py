@@ -99,6 +99,10 @@ from .block import (
     CoordinateAttention,
     SimAM,
     ConvNeXtBlock,
+    EdgePriorBlock,
+    LocalContextMixer,
+    TinyObjectAlignment,
+    AntiFPGate,
 )
 from .conv import (
     CBAM,
@@ -245,4 +249,8 @@ __all__ = (
     "CoordinateAttention",
     "SimAM",
     "ConvNeXtBlock",
+    "EdgePriorBlock",
+    "LocalContextMixer",
+    "TinyObjectAlignment",
+    "AntiFPGate",
 )
