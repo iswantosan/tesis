@@ -74,6 +74,8 @@ __all__ = (
     "LocalContextMixer",
     "TinyObjectAlignment",
     "AntiFPGate",
+    "BackgroundSuppressionGate",
+    "EdgeLineEnhancement",
 )
 
 
@@ -4649,6 +4651,156 @@ class AntiFPGate(nn.Module):
         
         # Residual: x * gate + x
         x = identity * gate + identity
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        return x
+
+
+class BackgroundSuppressionGate(nn.Module):
+    """
+    Background Suppression Gate (anti-nukleus): Suppress large activations (cells/nucleus) 
+    so BTA can be read.
+    
+    Concept: Create low-freq mask (large structures) then "gate" features.
+    
+    Architecture:
+    - bg = DWConv(k=7/9, stride=1) (low-pass filter)
+    - fg = x - bg (high-pass residual)
+    - gate = sigmoid(Conv1x1(fg))
+    - out = x * gate + x (residual)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        kernel_size (int): Kernel size for low-pass filter (default: 7, can be 9)
+    """
+    
+    def __init__(self, c1, c2=None, kernel_size=7):
+        """Initialize Background Suppression Gate."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Low-pass filter: DWConv with large kernel (7 or 9)
+        # This captures large structures (background/nucleus)
+        self.bg_conv = DWConv(c1, c1, k=kernel_size, s=1, act=False)
+        
+        # Gate: 1x1 conv + sigmoid on high-pass features
+        self.gate = nn.Sequential(
+            Conv(c1, c1, k=1, s=1, act=False),
+            nn.Sigmoid()
+        )
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through Background Suppression Gate.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with suppressed large activations
+        """
+        identity = x
+        
+        # Low-pass: capture background/large structures
+        bg = self.bg_conv(x)
+        
+        # High-pass: foreground = original - background
+        fg = x - bg
+        
+        # Gate mechanism on high-pass features
+        gate = self.gate(fg)
+        
+        # Residual: x * gate + x
+        x = identity * gate + identity
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        return x
+
+
+class EdgeLineEnhancement(nn.Module):
+    """
+    Edge/Line Enhancement Block: Enhance small edges/lines (especially for small rods).
+    
+    Grad-CAM shows only cell edges. This block enhances "small edges" correctly.
+    
+    Concept: Light high-pass + channel attention.
+    
+    Architecture:
+    - hp = DWConv3x3(x) - AvgPool(x) (Laplacian-ish high-pass)
+    - gate = sigmoid(MLP(GAP(hp)))
+    - out = x + hp * gate
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        reduction (int): MLP reduction ratio (default: 4)
+    """
+    
+    def __init__(self, c1, c2=None, reduction=4):
+        """Initialize Edge/Line Enhancement Block."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        from .transformer import MLP
+        
+        if c2 is None:
+            c2 = c1
+        
+        # High-pass: DWConv3x3 - AvgPool (Laplacian-ish)
+        self.dwconv = DWConv(c1, c1, k=3, s=1, act=False)
+        self.avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+        
+        # Channel attention: GAP + MLP
+        self.gap = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
+        mlp_hidden = max(c1 // reduction, 8)  # At least 8 hidden units
+        self.mlp = MLP(c1, mlp_hidden, c1, num_layers=2, act=nn.ReLU, sigmoid=True)
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through Edge/Line Enhancement Block.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with emphasized small edges/lines
+        """
+        identity = x
+        
+        # High-pass: DWConv3x3 - AvgPool (Laplacian-ish)
+        hp_dw = self.dwconv(x)
+        hp_avg = self.avgpool(x)
+        hp = hp_dw - hp_avg  # High-pass residual
+        
+        # Channel attention: GAP + MLP
+        hp_gap = self.gap(hp)  # [B, C, 1, 1]
+        hp_gap = hp_gap.squeeze(-1).squeeze(-1)  # [B, C]
+        gate = self.mlp(hp_gap)  # [B, C]
+        gate = gate.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+        
+        # Residual: x + hp * gate
+        x = identity + hp * gate
         
         # Project if needed
         if self.proj is not None:

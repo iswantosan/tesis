@@ -103,6 +103,8 @@ from .block import (
     LocalContextMixer,
     TinyObjectAlignment,
     AntiFPGate,
+    BackgroundSuppressionGate,
+    EdgeLineEnhancement,
 )
 from .conv import (
     CBAM,
@@ -253,4 +255,6 @@ __all__ = (
     "LocalContextMixer",
     "TinyObjectAlignment",
     "AntiFPGate",
+    "BackgroundSuppressionGate",
+    "EdgeLineEnhancement",
 )
