@@ -76,6 +76,9 @@ __all__ = (
     "AntiFPGate",
     "BackgroundSuppressionGate",
     "EdgeLineEnhancement",
+    "AggressiveBackgroundSuppression",
+    "CrossScaleSuppression",
+    "MultiScaleEdgeEnhancement",
 )
 
 
@@ -4801,6 +4804,254 @@ class EdgeLineEnhancement(nn.Module):
         
         # Residual: x + hp * gate
         x = identity + hp * gate
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        return x
+
+
+class AggressiveBackgroundSuppression(nn.Module):
+    """
+    Aggressive Background Suppression: Multi-stage suppression untuk P3/P4.
+    Lebih agresif dari BSG biasa - langsung subtract background, bukan hanya gate.
+    
+    Architecture:
+    - bg1 = DWConv(k=9, stride=1) (low-pass 1)
+    - bg2 = DWConv(k=7, stride=1) (low-pass 2) 
+    - bg_combined = (bg1 + bg2) / 2
+    - fg = x - bg_combined (high-pass)
+    - threshold = adaptive threshold based on fg magnitude
+    - out = fg * sigmoid(threshold) + x * (1 - sigmoid(threshold)) * 0.3
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        suppression_strength (float): How much to suppress background (0-1, default: 0.7)
+    """
+    
+    def __init__(self, c1, c2=None, suppression_strength=0.7):
+        """Initialize Aggressive Background Suppression."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.suppression_strength = suppression_strength
+        
+        # Multi-scale low-pass filters
+        self.bg_conv1 = DWConv(c1, c1, k=9, s=1, act=False)  # Large kernel
+        self.bg_conv2 = DWConv(c1, c1, k=7, s=1, act=False)  # Medium kernel
+        
+        # Adaptive threshold for suppression
+        self.threshold_conv = nn.Sequential(
+            Conv(c1, c1, k=1, s=1, act=False),
+            nn.Sigmoid()
+        )
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through Aggressive Background Suppression.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with aggressively suppressed large activations
+        """
+        identity = x
+        
+        # Multi-scale background extraction
+        bg1 = self.bg_conv1(x)
+        bg2 = self.bg_conv2(x)
+        bg_combined = (bg1 + bg2) / 2.0
+        
+        # High-pass: foreground = original - background
+        fg = x - bg_combined
+        
+        # Adaptive threshold based on foreground magnitude
+        fg_magnitude = torch.abs(fg)
+        threshold = self.threshold_conv(fg_magnitude)
+        
+        # Aggressive suppression: keep foreground, suppress background
+        # fg gets full weight, background gets reduced weight
+        x = fg * threshold + identity * (1 - threshold) * (1 - self.suppression_strength)
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        return x
+
+
+class CrossScaleSuppression(nn.Module):
+    """
+    Cross-Scale Background Suppression: P3 dan P4 saling reference untuk suppress background.
+    P4 (coarser) membantu identify large structures di P3 (finer).
+    Returns only P3 (main focus) - P4 can be suppressed separately.
+    
+    Architecture:
+    - P4_down = Downsample(P4) to match P3 spatial size
+    - bg_mask = sigmoid(Conv(P4_down)) - identifies large structures
+    - P3_suppressed = P3 * (1 - bg_mask * strength)
+    
+    Args:
+        c_p3 (int): P3 channels
+        c_p4 (int): P4 channels
+        c_out (int): Output channels
+        suppression_strength (float): Suppression strength (default: 0.8)
+    """
+    
+    def __init__(self, c_p3, c_p4, c_out, suppression_strength=0.8):
+        """Initialize Cross-Scale Suppression."""
+        super().__init__()
+        from .conv import Conv
+        
+        self.suppression_strength = suppression_strength
+        
+        # P4 → P3: Downsample and process
+        self.p4_to_p3 = Conv(c_p4, c_p3, k=1, s=1, act=True)
+        
+        # Background mask from P4
+        self.bg_mask_conv = nn.Sequential(
+            Conv(c_p3, c_p3, k=3, s=1, act=False),
+            nn.Sigmoid()
+        )
+        
+        # Output projection
+        self.proj_p3 = Conv(c_p3, c_out, k=1, s=1, act=True)
+    
+    def forward(self, x):
+        """
+        Forward pass through Cross-Scale Suppression.
+        
+        Args:
+            x: List of 2 tensors [P3, P4]
+        
+        Returns:
+            Suppressed P3 features (single tensor)
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            p3, p4 = x
+        else:
+            raise ValueError(f"CrossScaleSuppression expects list of 2 tensors [P3, P4], got {type(x)}")
+        
+        # P4 → P3: Downsample P4 to match P3 spatial size
+        _, _, h3, w3 = p3.shape
+        p4_down = F.interpolate(p4, size=(h3, w3), mode='bilinear', align_corners=False)
+        p4_down = self.p4_to_p3(p4_down)
+        
+        # Background mask from P4 (identifies large structures)
+        bg_mask_p3 = self.bg_mask_conv(p4_down)
+        
+        # Suppress P3: reduce activations where P4 shows large structures
+        p3_suppressed = p3 * (1 - bg_mask_p3 * self.suppression_strength)
+        p3_out = self.proj_p3(p3_suppressed)
+        
+        return p3_out
+
+
+class MultiScaleEdgeEnhancement(nn.Module):
+    """
+    Multi-Scale Edge Enhancement: Enhance edges di multiple scales untuk rod kecil.
+    Lebih agresif dari ELEB biasa - multiple high-pass filters + spatial attention.
+    
+    Architecture:
+    - hp1 = DWConv3x3(x) - AvgPool3x3(x)
+    - hp2 = DWConv5x5(x) - AvgPool5x5(x)  
+    - hp_combined = concat([hp1, hp2]) → Conv1x1
+    - spatial_attn = sigmoid(Conv1x1(GAP(hp_combined)))
+    - channel_attn = sigmoid(MLP(GAP(hp_combined)))
+    - out = x + hp_combined * spatial_attn * channel_attn * 2.0
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        enhancement_strength (float): Edge enhancement strength (default: 2.0)
+    """
+    
+    def __init__(self, c1, c2=None, enhancement_strength=2.0):
+        """Initialize Multi-Scale Edge Enhancement."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        from .transformer import MLP
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.enhancement_strength = enhancement_strength
+        
+        # Multi-scale high-pass filters
+        self.dwconv3 = DWConv(c1, c1, k=3, s=1, act=False)
+        self.avgpool3 = nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+        
+        self.dwconv5 = DWConv(c1, c1, k=5, s=1, act=False)
+        self.avgpool5 = nn.AvgPool2d(kernel_size=5, stride=1, padding=2)
+        
+        # Combine multi-scale edges
+        self.fuse = Conv(c1 * 2, c1, k=1, s=1, act=True)
+        
+        # Spatial attention: where to enhance
+        self.spatial_attn = nn.Sequential(
+            Conv(c1, c1, k=1, s=1, act=False),
+            nn.Sigmoid()
+        )
+        
+        # Channel attention: which channels to enhance
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        mlp_hidden = max(c1 // 4, 8)
+        self.channel_attn = MLP(c1, mlp_hidden, c1, num_layers=2, act=nn.ReLU, sigmoid=True)
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through Multi-Scale Edge Enhancement.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with multi-scale edge emphasis
+        """
+        identity = x
+        
+        # Multi-scale high-pass
+        hp3_dw = self.dwconv3(x)
+        hp3_avg = self.avgpool3(x)
+        hp3 = hp3_dw - hp3_avg  # Scale 3x3
+        
+        hp5_dw = self.dwconv5(x)
+        hp5_avg = self.avgpool5(x)
+        hp5 = hp5_dw - hp5_avg  # Scale 5x5
+        
+        # Combine multi-scale edges
+        hp_combined = torch.cat([hp3, hp5], dim=1)  # [B, 2C, H, W]
+        hp_combined = self.fuse(hp_combined)  # [B, C, H, W]
+        
+        # Spatial attention: where to enhance
+        spatial_gate = self.spatial_attn(hp_combined)
+        
+        # Channel attention: which channels to enhance
+        hp_gap = self.gap(hp_combined)  # [B, C, 1, 1]
+        hp_gap = hp_gap.squeeze(-1).squeeze(-1)  # [B, C]
+        channel_gate = self.channel_attn(hp_gap)  # [B, C]
+        channel_gate = channel_gate.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+        
+        # Enhanced output: x + edges * attention * strength
+        x = identity + hp_combined * spatial_gate * channel_gate * self.enhancement_strength
         
         # Project if needed
         if self.proj is not None:

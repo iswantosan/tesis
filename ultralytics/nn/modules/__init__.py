@@ -105,6 +105,9 @@ from .block import (
     AntiFPGate,
     BackgroundSuppressionGate,
     EdgeLineEnhancement,
+    AggressiveBackgroundSuppression,
+    CrossScaleSuppression,
+    MultiScaleEdgeEnhancement,
 )
 from .conv import (
     CBAM,
@@ -257,4 +260,7 @@ __all__ = (
     "AntiFPGate",
     "BackgroundSuppressionGate",
     "EdgeLineEnhancement",
+    "AggressiveBackgroundSuppression",
+    "CrossScaleSuppression",
+    "MultiScaleEdgeEnhancement",
 )
