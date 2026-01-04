@@ -79,6 +79,7 @@ __all__ = (
     "AggressiveBackgroundSuppression",
     "CrossScaleSuppression",
     "MultiScaleEdgeEnhancement",
+    "BGSuppressP3",
 )
 
 
@@ -4728,6 +4729,92 @@ class BackgroundSuppressionGate(nn.Module):
         
         # Residual: x * gate + x
         x = identity * gate + identity
+        
+        # Project if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        return x
+
+
+class BGSuppressP3(nn.Module):
+    """
+    Background Suppression P3 (Light): Suppress large structures (background/nucleus) 
+    while enhancing small details (BTA) di P3.
+    
+    Konsep operasi:
+    - bg = DWConv(k=7) atau AvgPool (low-freq background estimate)
+    - fg = x - bg (foreground detail)
+    - gate = sigmoid(Conv1x1(fg)) (gate untuk detail kecil)
+    - out = x + α * (fg * gate) (α learnable scalar, init 0.1)
+    
+    Intinya: struktur besar (bg) dikurangin, detail kecil (fg) dikuatin secara terkontrol.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        kernel_size (int): Kernel size for background estimate (default: 7, can be 5)
+        use_avgpool (bool): Use AvgPool instead of DWConv for bg (default: False)
+        alpha_init (float): Initial value for learnable alpha (default: 0.1)
+    """
+    
+    def __init__(self, c1, c2=None, kernel_size=7, use_avgpool=False, alpha_init=0.1):
+        """Initialize BGSuppressP3."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.kernel_size = kernel_size
+        self.use_avgpool = use_avgpool
+        
+        # Background estimate: low-freq filter
+        if use_avgpool:
+            # Alternative: AvgPool for background
+            padding = kernel_size // 2
+            self.bg_estimate = nn.AvgPool2d(kernel_size=kernel_size, stride=1, padding=padding)
+        else:
+            # DWConv for background (default)
+            self.bg_estimate = DWConv(c1, c1, k=kernel_size, s=1, act=False)
+        
+        # Gate: Conv1x1 on foreground
+        self.gate_conv = Conv(c1, c1, k=1, s=1, act=False)
+        self.gate_act = nn.Sigmoid()
+        
+        # Learnable alpha (init kecil biar gak merusak awal training)
+        self.alpha = nn.Parameter(torch.tensor(alpha_init, dtype=torch.float32))
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through BGSuppressP3.
+        
+        Args:
+            x: Input tensor [B, C, H, W] (P3 feature)
+        
+        Returns:
+            Features with suppressed background and enhanced small details
+        """
+        identity = x
+        
+        # Background estimate (low-freq)
+        bg = self.bg_estimate(x)
+        
+        # Foreground detail (high-freq)
+        fg = x - bg
+        
+        # Gate from foreground (detail kecil lebih lewat)
+        gate = self.gate_act(self.gate_conv(fg))
+        
+        # Output: x + α * (fg * gate)
+        # Struktur besar dikurangin, detail kecil dikuatin secara terkontrol
+        x = identity + self.alpha * (fg * gate)
         
         # Project if needed
         if self.proj is not None:

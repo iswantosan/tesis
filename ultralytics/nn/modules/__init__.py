@@ -108,6 +108,7 @@ from .block import (
     AggressiveBackgroundSuppression,
     CrossScaleSuppression,
     MultiScaleEdgeEnhancement,
+    BGSuppressP3,
 )
 from .conv import (
     CBAM,
@@ -263,4 +264,5 @@ __all__ = (
     "AggressiveBackgroundSuppression",
     "CrossScaleSuppression",
     "MultiScaleEdgeEnhancement",
+    "BGSuppressP3",
 )

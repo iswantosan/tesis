@@ -120,6 +120,7 @@ from ultralytics.nn.modules import (
     AggressiveBackgroundSuppression,
     CrossScaleSuppression,
     MultiScaleEdgeEnhancement,
+    BGSuppressP3,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1313,6 +1314,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1 = ch[f]  # Input channels (for compatibility)
             e_lambda = args[0] if args else 1e-4  # Lambda parameter
             args = [c1, c1, e_lambda]  # c1, c2 (same), e_lambda
+        elif m is CBAM:
+            # CBAM needs (c1, kernel_size)
+            c1 = ch[f]  # Input channels from previous layer
+            kernel_size = args[0] if args else 7  # Kernel size (default: 7)
+            args = [c1, kernel_size]
+        elif m is ChannelAttention:
+            # ChannelAttention needs (channels)
+            c1 = ch[f]  # Input channels from previous layer
+            # ChannelAttention only takes channels, no c2
+            args = [c1]
+        elif m is SpatialAttention:
+            # SpatialAttention needs (kernel_size)
+            kernel_size = args[0] if args else 7  # Kernel size (default: 7)
+            args = [kernel_size]
         elif m is ConvNeXtBlock:
             # ConvNeXtBlock needs (c1, c2) where c1 is input and c2 is output channels
             c2 = args[0] if args else ch[f]  # Output channels from args
@@ -1375,6 +1390,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1 = ch[f]  # Input channels from previous layer
             enhancement_strength = args[1] if len(args) > 1 else 2.0  # Enhancement strength (default: 2.0)
             args = [c1, c2, enhancement_strength]
+        elif m is BGSuppressP3:
+            # BGSuppressP3 needs (c1, c2, kernel_size, use_avgpool, alpha_init)
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            kernel_size = args[1] if len(args) > 1 else 7  # Kernel size (default: 7)
+            use_avgpool = args[2] if len(args) > 2 else False  # Use AvgPool (default: False)
+            alpha_init = args[3] if len(args) > 3 else 0.1  # Alpha init (default: 0.1)
+            args = [c1, c2, kernel_size, use_avgpool, alpha_init]
         elif m is AntiFPGate:
             # AntiFPGate needs (c1, c2) where c1 is input and c2 is output channels
             c2 = args[0] if args else ch[f]  # Output channels from args
