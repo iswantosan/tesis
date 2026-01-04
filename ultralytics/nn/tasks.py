@@ -46,6 +46,7 @@ from ultralytics.nn.modules import (
     Conv2,
     ConvTranspose,
     Detect,
+    DecoupledP3Detect,
     DWConv,
     DWConvTranspose2d,
     Focus,
@@ -1211,7 +1212,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c_p2, c_p3_arg, c_out]
             else:
                 raise ValueError(f"CIB2 expects list of 2 layer indices in 'from', got {f}")
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
+        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, DecoupledP3Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)

@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DecoupledP3Detect"
 
 
 class Detect(nn.Module):
@@ -623,3 +623,120 @@ class v10Detect(Detect):
             for x in ch
         )
         self.one2one_cv3 = copy.deepcopy(self.cv3)
+
+
+class DecoupledP3Detect(Detect):
+    """
+    Decoupled Detect Head khusus untuk P3.
+    
+    Konsep: Pisahkan classification dan regression branch HANYA untuk P3 (tiny objects).
+    P4/P5 tetap shared head seperti biasa.
+    
+    Kenapa ini penting untuk BTA (tiny, rod-like):
+    - Classification butuh: tekstur + edge + kontras
+    - Regression butuh: lokalisasi stabil + konteks lokal
+    - Shared head memaksa satu feature map memenuhi dua tujuan → sinyal "tanggung"
+    
+    Architecture:
+    - P3: cls_branch dan reg_branch terpisah (decoupled)
+    - P4/P5: shared head (cv2 + cv3 seperti biasa)
+    
+    Args:
+        nc (int): Number of classes
+        ch (tuple): Input channels for each scale [P3, P4, P5]
+    """
+    
+    def __init__(self, nc=80, ch=()):
+        """Initialize DecoupledP3Detect."""
+        super().__init__(nc, ch)
+        
+        # P3 decoupled branches (index 0)
+        c_p3 = ch[0]
+        c2_p3 = max((16, c_p3 // 4, self.reg_max * 4))
+        c3_p3 = max(c_p3, min(self.nc, 100))
+        
+        # P3: Separate cls and reg branches (more depth for specialization)
+        self.p3_cls_branch = nn.Sequential(
+            Conv(c_p3, c3_p3, 3),
+            Conv(c3_p3, c3_p3, 3),
+            Conv(c3_p3, c3_p3, 3),  # Extra layer for cls specialization
+            nn.Conv2d(c3_p3, self.nc, 1)
+        )
+        
+        self.p3_reg_branch = nn.Sequential(
+            Conv(c_p3, c2_p3, 3),
+            Conv(c2_p3, c2_p3, 3),
+            Conv(c2_p3, c2_p3, 3),  # Extra layer for reg specialization
+            nn.Conv2d(c2_p3, 4 * self.reg_max, 1)
+        )
+        
+        # P4/P5 tetap shared (indices 1, 2) - gunakan cv2 dan cv3 dari parent
+        # cv2 dan cv3 sudah dibuat untuk semua scales, kita hanya override P3
+    
+    def forward(self, x):
+        """Forward pass dengan decoupled P3."""
+        if self.end2end:
+            return self.forward_end2end(x)
+        
+        # Process P3 dengan decoupled branches
+        p3_cls = self.p3_cls_branch(x[0])
+        p3_reg = self.p3_reg_branch(x[0])
+        x[0] = torch.cat((p3_reg, p3_cls), 1)
+        
+        # P4/P5 tetap shared (cv2 + cv3)
+        for i in range(1, self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+        
+        if self.training:
+            return x
+        
+        y = self._inference(x)
+        return y if self.export else (y, x)
+    
+    def forward_end2end(self, x):
+        """End2end forward dengan decoupled P3."""
+        x_detach = [xi.detach() for xi in x]
+        
+        # P3 decoupled untuk one2one
+        p3_cls_one2one = self.p3_cls_branch(x_detach[0])
+        p3_reg_one2one = self.p3_reg_branch(x_detach[0])
+        one2one = [torch.cat((p3_reg_one2one, p3_cls_one2one), 1)]
+        
+        # P4/P5 one2one
+        for i in range(1, self.nl):
+            one2one.append(torch.cat((self.one2one_cv2[i](x_detach[i]), self.one2one_cv3[i](x_detach[i])), 1))
+        
+        # P3 decoupled untuk one2many
+        p3_cls = self.p3_cls_branch(x[0])
+        p3_reg = self.p3_reg_branch(x[0])
+        x[0] = torch.cat((p3_reg, p3_cls), 1)
+        
+        # P4/P5 one2many
+        for i in range(1, self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+        
+        if self.training:
+            return {"one2many": x, "one2one": one2one}
+        
+        y = self._inference(one2one)
+        y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
+        return y if self.export else (y, {"one2many": x, "one2one": one2one})
+    
+    def bias_init(self):
+        """Initialize biases untuk decoupled P3."""
+        m = self
+        
+        # P3: Initialize decoupled branches
+        m.p3_reg_branch[-1].bias.data[:] = 1.0  # box
+        m.p3_cls_branch[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / m.stride[0]) ** 2)  # cls
+        
+        # P4/P5: Initialize shared branches
+        for a, b, s in zip(m.cv2[1:], m.cv3[1:], m.stride[1:]):
+            a[-1].bias.data[:] = 1.0  # box
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls
+        
+        if self.end2end:
+            # one2one branches (P4/P5 only, P3 handled above)
+            for a, b, s in zip(m.one2one_cv2[1:], m.one2one_cv3[1:], m.stride[1:]):
+                a[-1].bias.data[:] = 1.0  # box
+                b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls

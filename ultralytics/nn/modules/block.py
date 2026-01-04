@@ -4883,7 +4883,8 @@ class AggressiveBackgroundSuppression(nn.Module):
         
         # Aggressive suppression: keep foreground, suppress background
         # fg gets full weight, background gets reduced weight
-        x = fg * threshold + identity * (1 - threshold) * (1 - self.suppression_strength)
+        # Add small residual to prevent complete zeroing
+        x = fg * threshold + identity * (1 - threshold) * (1 - self.suppression_strength) + identity * 0.1
         
         # Project if needed
         if self.proj is not None:
@@ -4953,7 +4954,8 @@ class CrossScaleSuppression(nn.Module):
         bg_mask_p3 = self.bg_mask_conv(p4_down)
         
         # Suppress P3: reduce activations where P4 shows large structures
-        p3_suppressed = p3 * (1 - bg_mask_p3 * self.suppression_strength)
+        # Add small residual to prevent complete zeroing
+        p3_suppressed = p3 * (1 - bg_mask_p3 * self.suppression_strength) + p3 * 0.1
         p3_out = self.proj_p3(p3_suppressed)
         
         return p3_out

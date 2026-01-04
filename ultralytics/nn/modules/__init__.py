@@ -126,7 +126,7 @@ from .conv import (
     SpatialAttention,
     SPDConv,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect
 from .transformer import (
     AIFI,
     MLP,
