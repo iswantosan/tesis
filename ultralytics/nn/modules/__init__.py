@@ -109,6 +109,9 @@ from .block import (
     CrossScaleSuppression,
     MultiScaleEdgeEnhancement,
     BGSuppressP3,
+    FSNeck,
+    DIFuse,
+    SADHead,
 )
 from .conv import (
     CBAM,
@@ -265,4 +268,7 @@ __all__ = (
     "CrossScaleSuppression",
     "MultiScaleEdgeEnhancement",
     "BGSuppressP3",
+    "FSNeck",
+    "DIFuse",
+    "SADHead",
 )

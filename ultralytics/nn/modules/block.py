@@ -80,6 +80,9 @@ __all__ = (
     "CrossScaleSuppression",
     "MultiScaleEdgeEnhancement",
     "BGSuppressP3",
+    "FSNeck",
+    "DIFuse",
+    "SADHead",
 )
 
 
@@ -5147,3 +5150,258 @@ class MultiScaleEdgeEnhancement(nn.Module):
             x = self.proj(x)
         
         return x
+
+
+class FSNeck(nn.Module):
+    """
+    Frequency-Separated Neck (FS-Neck) untuk P3.
+    
+    Masalah yang disasar: Grad-CAM lu panas ke blob besar (low-frequency).
+    Ide: di neck P3, pisahkan komponen low/high frequency, lalu prioritaskan high-frequency untuk P3.
+    
+    Architecture:
+    - low = AvgPool(x, k=5/7) atau DWConv(k=7) (low-pass)
+    - high = x - low (high-pass)
+    - out = Conv([x, high]) atau out = x + Conv(high)
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        kernel_size (int): Kernel size for low-pass filter (default: 7, can be 5)
+        use_avgpool (bool): Use AvgPool instead of DWConv for low-pass (default: False)
+    """
+    
+    def __init__(self, c1, c2=None, kernel_size=7, use_avgpool=False):
+        """Initialize Frequency-Separated Neck."""
+        super().__init__()
+        from .conv import Conv, DWConv
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.kernel_size = kernel_size
+        self.use_avgpool = use_avgpool
+        
+        # Low-pass filter: extract low-frequency (large blobs)
+        if use_avgpool:
+            self.low_pass = nn.AvgPool2d(kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+        else:
+            self.low_pass = DWConv(c1, c1, k=kernel_size, s=1, act=False)
+        
+        # High-frequency processing: prioritize high-freq components
+        self.high_conv = Conv(c1, c1, k=1, s=1, act=True)
+        
+        # Fusion: combine original, low, and high
+        self.fusion = Conv(c1 * 2, c2, k=1, s=1, act=True)
+    
+    def forward(self, x):
+        """
+        Forward pass through Frequency-Separated Neck.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with high-frequency prioritized for small object detection
+        """
+        identity = x
+        
+        # Low-frequency component (large blobs/background)
+        low = self.low_pass(x)
+        
+        # High-frequency component (small objects/details)
+        high = x - low
+        
+        # Process high-frequency
+        high_processed = self.high_conv(high)
+        
+        # Fusion: concat original and high-freq, prioritize high-freq
+        x_concat = torch.cat([identity, high_processed], dim=1)
+        x = self.fusion(x_concat)
+        
+        return x
+
+
+class DIFuse(nn.Module):
+    """
+    Learnable P2→P3 Detail Injection (DI-Fuse) dengan Gate.
+    
+    Masalah: BTA itu borderline P2 detail; P3 doang kadang telat.
+    Ide: inject detail dari P2 ke P3 head tapi digate supaya noise stain nggak kebawa.
+    
+    Architecture:
+    - Ambil P2 feat (stride /4), downsample ke /8: P2toP3 = Conv(stride=2)
+    - Hitung gate: g = sigmoid(Conv1x1(P3)) atau sigmoid(Conv1x1(P2toP3))
+    - Fuse: P3 = P3 + α * (g * P2toP3) (α learnable kecil)
+    
+    Args:
+        c_p2 (int): P2 channels
+        c_p3 (int): P3 channels
+        c_out (int): Output channels (default: same as P3)
+        alpha_init (float): Initial value for learnable alpha (default: 0.1)
+        gate_from_p3 (bool): Compute gate from P3 instead of P2toP3 (default: True)
+    """
+    
+    def __init__(self, c_p2, c_p3, c_out=None, alpha_init=0.1, gate_from_p3=True):
+        """Initialize Detail Injection Fuse."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c_out is None:
+            c_out = c_p3
+        
+        self.gate_from_p3 = gate_from_p3
+        
+        # P2 → P3: Downsample and channel alignment
+        self.p2_to_p3 = nn.Sequential(
+            Conv(c_p2, c_p3, k=3, s=2, act=True),  # Downsample stride=2
+            Conv(c_p3, c_p3, k=1, s=1, act=True)   # Channel alignment
+        )
+        
+        # Gate: learnable attention to control injection
+        if gate_from_p3:
+            # Gate computed from P3 (safer, P3 already processed)
+            self.gate_conv = nn.Sequential(
+                Conv(c_p3, c_p3, k=1, s=1, act=False),
+                nn.Sigmoid()
+            )
+        else:
+            # Gate computed from P2toP3 (more direct)
+            self.gate_conv = nn.Sequential(
+                Conv(c_p3, c_p3, k=1, s=1, act=False),
+                nn.Sigmoid()
+            )
+        
+        # Learnable fusion weight (alpha)
+        self.alpha = nn.Parameter(torch.tensor(alpha_init))
+        
+        # Output projection if needed
+        if c_p3 != c_out:
+            self.proj = Conv(c_p3, c_out, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through Detail Injection Fuse.
+        
+        Args:
+            x: List of 2 tensors [P3, P2] or single tensor P3 (if P2 is pre-processed)
+        
+        Returns:
+            Enhanced P3 features with gated P2 detail injection
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            p3, p2 = x
+        else:
+            raise ValueError(f"DIFuse expects list of 2 tensors [P3, P2], got {type(x)}")
+        
+        # P2 → P3: Downsample and align
+        p2_to_p3 = self.p2_to_p3(p2)
+        
+        # Ensure spatial match (safety check)
+        _, _, h3, w3 = p3.shape
+        if p2_to_p3.shape[2:] != (h3, w3):
+            p2_to_p3 = F.interpolate(p2_to_p3, size=(h3, w3), mode='bilinear', align_corners=False)
+        
+        # Compute gate
+        if self.gate_from_p3:
+            gate = self.gate_conv(p3)
+        else:
+            gate = self.gate_conv(p2_to_p3)
+        
+        # Gated fusion: P3 + α * (gate * P2toP3)
+        p3_enhanced = p3 + self.alpha * (gate * p2_to_p3)
+        
+        # Project if needed
+        if self.proj is not None:
+            p3_enhanced = self.proj(p3_enhanced)
+        
+        return p3_enhanced
+
+
+class SADHead(nn.Module):
+    """
+    Scale-Aware Dynamic NMS Head (SAD-Head) untuk P3.
+    
+    Bukan NMS "di luar", tapi head menghasilkan prediksi dengan prior tiny.
+    Masalah: model sering high-conf di blob besar; P3 harus "anti-box-besar".
+    Ide: di P3 head, tambahkan size prior gate yang menurunkan confidence untuk bbox besar.
+    
+    Architecture:
+    - Reg branch memprediksi box distribution/width-height (atau proxy)
+    - Buat penalty: pen = sigmoid(Conv(proxy_wh))
+    - Output cls: cls = cls * (1 - β*pen) (β learnable)
+    - Jadi P3 cenderung confident pada bbox kecil
+    
+    Args:
+        c1 (int): Input channels (P3 feature channels)
+        reg_max (int): DFL reg_max (default: 16)
+        beta_init (float): Initial value for learnable beta penalty (default: 0.5)
+    """
+    
+    def __init__(self, c1, reg_max=16, beta_init=0.5):
+        """Initialize Scale-Aware Dynamic Head."""
+        super().__init__()
+        from .conv import Conv
+        
+        self.reg_max = reg_max
+        
+        # Proxy for box size: predict width-height proxy from features
+        # Use a simple conv to estimate "box size proxy"
+        self.size_proxy_conv = nn.Sequential(
+            Conv(c1, c1 // 2, k=3, s=1, act=True),
+            Conv(c1 // 2, 1, k=1, s=1, act=False)  # Single channel: box size proxy
+        )
+        
+        # Penalty computation: larger boxes get higher penalty
+        self.penalty_conv = nn.Sequential(
+            Conv(1, 1, k=3, s=1, act=False),
+            nn.Sigmoid()
+        )
+        
+        # Learnable penalty strength (beta)
+        self.beta = nn.Parameter(torch.tensor(beta_init))
+    
+    def forward(self, x):
+        """
+        Forward pass through Scale-Aware Dynamic Head.
+        
+        Args:
+            x: Input tensor [B, C, H, W] (P3 features)
+        
+        Returns:
+            Modified features with size-aware penalty applied
+            Note: This should be applied to cls logits before sigmoid in Detect head
+        """
+        # Compute box size proxy (larger values = larger boxes)
+        size_proxy = self.size_proxy_conv(x)  # [B, 1, H, W]
+        
+        # Compute penalty (higher for larger boxes)
+        penalty = self.penalty_conv(size_proxy)  # [B, 1, H, W]
+        
+        # Store penalty for later use in Detect head
+        # We'll return both features and penalty
+        # The penalty will be used to modulate cls logits
+        return x, penalty
+    
+    def apply_penalty_to_cls(self, cls_logits, penalty):
+        """
+        Apply size-aware penalty to classification logits.
+        
+        Args:
+            cls_logits: Classification logits [B, nc, H, W]
+            penalty: Size penalty [B, 1, H, W]
+        
+        Returns:
+            Penalized classification logits
+        """
+        # Expand penalty to match cls_logits channels
+        # penalty: [B, 1, H, W] -> [B, nc, H, W]
+        penalty_expanded = penalty.expand_as(cls_logits)
+        
+        # Apply penalty: cls = cls * (1 - β * penalty)
+        # Larger boxes (higher penalty) get lower confidence
+        cls_penalized = cls_logits * (1 - self.beta * penalty_expanded)
+        
+        return cls_penalized
