@@ -22,10 +22,10 @@ backbone:
   - [-1, 2, C3k2,  [256, False, 0.25]] # 2
   - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 3-P3/8
   - [-1, 2, C3k2,  [512, False, 0.25]] # 4
-  - [-1, 1, AggressiveBackgroundSuppression, [512, 512, 0.8]] # 5 ABS: Strong suppression (0.8) di P3
+  - [-1, 1, AggressiveBackgroundSuppression, [512, 0.8]] # 5 ABS: Strong suppression (0.8) di P3 (c2=512, strength=0.8)
   - [-1, 1, Conv,  [512, 3, 2]] # 6-P4/16
   - [-1, 4, A2C2f, [512, True, 4]] # 7
-  - [-1, 1, AggressiveBackgroundSuppression, [512, 512, 0.8]] # 8 ABS: Strong suppression (0.8) di P4
+  - [-1, 1, AggressiveBackgroundSuppression, [512, 0.8]] # 8 ABS: Strong suppression (0.8) di P4 (c2=512, strength=0.8)
   - [-1, 1, Conv,  [1024, 3, 2]] # 9-P5/32
   - [-1, 4, A2C2f, [1024, True, 1]] # 10
 
@@ -34,13 +34,13 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 11
   - [[-1, 8], 1, Concat, [1]] # 12 cat backbone P4 (setelah ABS)
   - [-1, 2, A2C2f, [512, False, -1]] # 13
-  - [-1, 1, MultiScaleEdgeEnhancement, [512, 512, 2.5]] # 14 MSE: Edge enhancement di HeadP4
+  - [-1, 1, MultiScaleEdgeEnhancement, [512, 2.5]] # 14 MSE: Edge enhancement di HeadP4 (c2=512, strength=2.5)
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 15
   - [[-1, 5], 1, Concat, [1]] # 16 cat backbone P3 (setelah ABS)
   - [-1, 2, A2C2f, [256, False, -1]] # 17
-  - [-1, 1, MultiScaleEdgeEnhancement, [256, 256, 2.5]] # 18 MSE: Edge enhancement di HeadP3 (strong)
-  - [-1, 1, AggressiveBackgroundSuppression, [256, 256, 0.6]] # 19 ABS: Final suppression sebelum Detect P3
+  - [-1, 1, MultiScaleEdgeEnhancement, [256, 2.5]] # 18 MSE: Edge enhancement di HeadP3 (strong, c2=256, strength=2.5)
+  - [-1, 1, AggressiveBackgroundSuppression, [256, 0.6]] # 19 ABS: Final suppression sebelum Detect P3 (c2=256, strength=0.6)
 
   - [-1, 1, Conv, [256, 3, 2]] # 20
   - [[-1, 13], 1, Concat, [1]] # 21 cat head P4

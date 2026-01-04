@@ -1342,6 +1342,38 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             c1 = ch[f]  # Input channels from previous layer
             args = [c1, c2]
+        elif m is BackgroundSuppressionGate:
+            # BackgroundSuppressionGate needs (c1, c2, kernel_size)
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            kernel_size = args[1] if len(args) > 1 else 7  # Kernel size (default: 7)
+            args = [c1, c2, kernel_size]
+        elif m is EdgeLineEnhancement:
+            # EdgeLineEnhancement needs (c1, c2, reduction)
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            reduction = args[1] if len(args) > 1 else 4  # Reduction ratio (default: 4)
+            args = [c1, c2, reduction]
+        elif m is AggressiveBackgroundSuppression:
+            # AggressiveBackgroundSuppression needs (c1, c2, suppression_strength)
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            suppression_strength = args[1] if len(args) > 1 else 0.7  # Suppression strength (default: 0.7)
+            args = [c1, c2, suppression_strength]
+        elif m is MultiScaleEdgeEnhancement:
+            # MultiScaleEdgeEnhancement needs (c1, c2, enhancement_strength)
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            enhancement_strength = args[1] if len(args) > 1 else 2.0  # Enhancement strength (default: 2.0)
+            args = [c1, c2, enhancement_strength]
         elif m is AntiFPGate:
             # AntiFPGate needs (c1, c2) where c1 is input and c2 is output channels
             c2 = args[0] if args else ch[f]  # Output channels from args

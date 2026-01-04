@@ -23,10 +23,10 @@ backbone:
   - [-1, 2, C3k2,  [256, False, 0.25]] # 2
   - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 3-P3/8
   - [-1, 2, C3k2,  [512, False, 0.25]] # 4
-  - [-1, 1, AggressiveBackgroundSuppression, [512, 512, 0.7]] # 5 ABS: Aggressive suppression di P3 backbone output
+  - [-1, 1, AggressiveBackgroundSuppression, [512, 0.7]] # 5 ABS: Aggressive suppression di P3 backbone output (c2=512, strength=0.7)
   - [-1, 1, Conv,  [512, 3, 2]] # 6-P4/16
   - [-1, 4, A2C2f, [512, True, 4]] # 7
-  - [-1, 1, AggressiveBackgroundSuppression, [512, 512, 0.7]] # 8 ABS: Aggressive suppression di P4 backbone output
+  - [-1, 1, AggressiveBackgroundSuppression, [512, 0.7]] # 8 ABS: Aggressive suppression di P4 backbone output (c2=512, strength=0.7)
   - [-1, 1, Conv,  [1024, 3, 2]] # 9-P5/32
   - [-1, 4, A2C2f, [1024, True, 1]] # 10
 
@@ -42,7 +42,7 @@ head:
   
   # Cross-Scale Suppression: P3 dan P4 saling reference untuk suppress background
   - [[16, 13], 1, CrossScaleSuppression, [256, 0.8]] # 17 CSS: Cross-scale suppression P3↔P4 (c_out=256, strength=0.8)
-  - [-1, 1, MultiScaleEdgeEnhancement, [256, 256, 2.0]] # 18 MSE: Multi-scale edge enhancement di HeadP3
+  - [-1, 1, MultiScaleEdgeEnhancement, [256, 2.0]] # 18 MSE: Multi-scale edge enhancement di HeadP3 (c2=256, strength=2.0)
   - [-1, 1, Conv, [256, 3, 2]] # 19
   - [[-1, 13], 1, Concat, [1]] # 20 cat head P4
   - [-1, 2, A2C2f, [512, False, -1]] # 21
