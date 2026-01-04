@@ -41,7 +41,7 @@ head:
   - [-1, 2, A2C2f, [256, False, -1]] # 16
   
   # Cross-Scale Suppression: P3 dan P4 saling reference untuk suppress background
-  - [[16, 13], 1, CrossScaleSuppression, [256, 512, 256]] # 17 CSS: Cross-scale suppression P3↔P4
+  - [[16, 13], 1, CrossScaleSuppression, [256, 0.8]] # 17 CSS: Cross-scale suppression P3↔P4 (c_out=256, strength=0.8)
   - [-1, 1, MultiScaleEdgeEnhancement, [256, 256, 2.0]] # 18 MSE: Multi-scale edge enhancement di HeadP3
   - [-1, 1, Conv, [256, 3, 2]] # 19
   - [[-1, 13], 1, Concat, [1]] # 20 cat head P4

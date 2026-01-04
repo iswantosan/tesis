@@ -114,6 +114,11 @@ from ultralytics.nn.modules import (
     LocalContextMixer,
     TinyObjectAlignment,
     AntiFPGate,
+    BackgroundSuppressionGate,
+    EdgeLineEnhancement,
+    AggressiveBackgroundSuppression,
+    CrossScaleSuppression,
+    MultiScaleEdgeEnhancement,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1250,6 +1255,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c_p3, c_p4, c_out]
             else:
                 raise ValueError(f"CSFR expects list of 2 layer indices in 'from', got {f}")
+        elif m is CrossScaleSuppression:
+            # CrossScaleSuppression receives 2 inputs: [P3, P4]
+            # Args: [c_out, suppression_strength] or [c_out] or empty
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c_p3 = ch[f[0]]  # P3 channels
+                c_p4 = ch[f[1]]  # P4 channels
+                c_out = args[0] if args else c_p3  # Output channels (default: P3 channels)
+                suppression_strength = args[1] if len(args) > 1 else 0.8  # Suppression strength (default: 0.8)
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c_p3, c_p4, c_out, suppression_strength]
+            else:
+                raise ValueError(f"CrossScaleSuppression expects list of 2 layer indices in 'from', got {f}")
         elif m is RPP:
             # RPP receives 2 inputs: [P3_neck, P2_backbone]
             # Args: [c_out] where c_out is output channels
