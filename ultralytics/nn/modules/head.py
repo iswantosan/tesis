@@ -853,38 +853,37 @@ class DWDecoupledHead(Detect):
         super().__init__(nc, ch)
         from .conv import DWConv, Conv
         
-        self.nc = nc
-        self.nl = len(ch)
-        self.reg_max = 16
-        self.no = nc + self.reg_max * 4
+        # Parent Detect sudah set: self.nc, self.nl, self.reg_max, self.no, self.cv2, self.cv3
+        # Kita override cv2 dan cv3 dengan decoupled branches
         
-        # Decoupled branches: cls dan reg terpisah dengan DWConv
-        self.cls_branches = nn.ModuleList()
-        self.reg_branches = nn.ModuleList()
+        # Override parent's cv2 dan cv3 dengan decoupled branches
+        # Clear parent's branches
+        self.cv2 = nn.ModuleList()
+        self.cv3 = nn.ModuleList()
         
         for c in ch:
             c2_cls = max(c, min(self.nc, 100))
             c2_reg = max((16, c // 4, self.reg_max * 4))
             
-            # Classification branch: DWConv + PointConv
-            cls_branch = nn.Sequential(
-                DWConv(c, c, k=3, s=1, d=1, act=True),
-                Conv(c, c2_cls, k=1, s=1, act=True),
-                DWConv(c2_cls, c2_cls, k=3, s=1, d=1, act=True),
-                nn.Conv2d(c2_cls, self.nc, 1)
-            )
-            self.cls_branches.append(cls_branch)
-            
-            # Regression branch: DWConv + PointConv
+            # Regression branch: DWConv + PointConv (replace cv2)
             reg_branch = nn.Sequential(
                 DWConv(c, c, k=3, s=1, d=1, act=True),
                 Conv(c, c2_reg, k=1, s=1, act=True),
                 DWConv(c2_reg, c2_reg, k=3, s=1, d=1, act=True),
                 nn.Conv2d(c2_reg, 4 * self.reg_max, 1)
             )
-            self.reg_branches.append(reg_branch)
+            self.cv2.append(reg_branch)
+            
+            # Classification branch: DWConv + PointConv (replace cv3)
+            cls_branch = nn.Sequential(
+                DWConv(c, c, k=3, s=1, d=1, act=True),
+                Conv(c, c2_cls, k=1, s=1, act=True),
+                DWConv(c2_cls, c2_cls, k=3, s=1, d=1, act=True),
+                nn.Conv2d(c2_cls, self.nc, 1)
+            )
+            self.cv3.append(cls_branch)
         
-        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+        # DFL sudah di-set oleh parent, tidak perlu override
     
     def forward(self, x):
         """
@@ -897,13 +896,15 @@ class DWDecoupledHead(Detect):
             Training: List of concatenated [reg, cls] outputs
             Inference: Processed predictions
         """
+        # Use parent's forward logic but with decoupled branches
+        # cv2 = reg branch, cv3 = cls branch
         outputs = []
         for i, feat in enumerate(x):
             # Separate cls and reg branches
-            cls_out = self.cls_branches[i](feat)
-            reg_out = self.reg_branches[i](feat)
+            reg_out = self.cv2[i](feat)  # Regression branch
+            cls_out = self.cv3[i](feat)  # Classification branch
             
-            # Concatenate: [reg, cls] format
+            # Concatenate: [reg, cls] format (same as parent Detect)
             output = torch.cat([reg_out, cls_out], dim=1)
             outputs.append(output)
         
