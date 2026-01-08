@@ -1591,7 +1591,7 @@ def guess_model_task(model):
         m = cfg["head"][-1][-2].lower()  # output module name
         if m in {"classify", "classifier", "cls", "fc"}:
             return "classify"
-        if "detect" in m:
+        if "detect" in m or "dwdecoupledhead" in m or "smallobjectenhancementhead" in m:
             return "detect"
         if m == "segment":
             return "segment"
@@ -1621,7 +1621,7 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect, v10Detect)):
+            elif isinstance(m, (Detect, WorldDetect, v10Detect, DWDecoupledHead, SmallObjectEnhancementHead)):
                 return "detect"
 
     # Guess from model filename
