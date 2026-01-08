@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DecoupledP3Detect"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DecoupledP3Detect", "SmallObjectEnhancementHead", "DWDecoupledHead"
 
 
 class Detect(nn.Module):
@@ -740,3 +740,182 @@ class DecoupledP3Detect(Detect):
             for a, b, s in zip(m.one2one_cv2[1:], m.one2one_cv3[1:], m.stride[1:]):
                 a[-1].bias.data[:] = 1.0  # box
                 b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls
+
+
+class SmallObjectEnhancementHead(Detect):
+    """
+    Detection Head dengan enhancement untuk small object.
+    
+    Punya 2 branch: standard + small-object-specific dengan auxiliary loss.
+    Branch khusus punya auxiliary loss untuk objek < 32px.
+    Meningkatkan sensitivity detection untuk small objects.
+    
+    Architecture:
+    - Branch 1 (standard): Detection normal (inherit dari Detect)
+    - Branch 2 (enhanced): 
+      - Extra conv layers untuk refine
+      - Objectness weight (sigmoid) untuk fokus ke region berpotensi ada objek
+      - Output = feature × objectness_weight
+    
+    Training: 2 loss (standard + auxiliary untuk objek <32px)
+    Inference: Weighted ensemble (0.6×standard + 0.4×enhanced)
+    
+    Args:
+        nc (int): Number of classes
+        ch (tuple): Input channels for each detection layer
+    """
+    
+    def __init__(self, nc=80, ch=()):
+        """Initialize SmallObjectEnhancementHead with standard and enhanced branches."""
+        super().__init__(nc, ch)
+        
+        # Small object branch (auxiliary)
+        self.small_obj_branch = nn.ModuleList([
+            nn.Sequential(
+                Conv(c, c, 3),
+                Conv(c, c, 3),
+                nn.Conv2d(c, self.no, 1)
+            ) for c in ch
+        ])
+        
+        # Objectness enhancement
+        self.obj_enhance = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(c, c//2, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(c//2, 1, 1),
+                nn.Sigmoid()
+            ) for c in ch
+        ])
+    
+    def forward(self, x):
+        """
+        Forward pass through SmallObjectEnhancementHead.
+        
+        Args:
+            x: List of feature tensors from detection layers
+        
+        Returns:
+            Training: Tuple of (standard_out, enhanced_out) untuk auxiliary loss
+            Inference: Weighted combination (0.6×standard + 0.4×enhanced)
+        """
+        # Standard detection (from parent Detect class)
+        standard_out = []
+        enhanced_out = []
+        
+        for i, (feat, m, small_m, obj_m) in enumerate(
+            zip(x, self.cv3, self.small_obj_branch, self.obj_enhance)
+        ):
+            # Standard path (from parent Detect)
+            # Need to process through cv2 and cv3 like parent
+            standard_feat = torch.cat((self.cv2[i](feat), self.cv3[i](feat)), 1)
+            standard_out.append(standard_feat)
+            
+            # Small object enhanced path
+            obj_weight = obj_m(feat)
+            enhanced_feat = small_m(feat * obj_weight)
+            enhanced_out.append(enhanced_feat)
+        
+        if self.training:
+            # Return both untuk auxiliary loss
+            # Standard output format: list of [box, cls] concatenated
+            return standard_out, enhanced_out
+        else:
+            # Inference: weighted combination
+            final_out = [
+                0.6 * s + 0.4 * e 
+                for s, e in zip(standard_out, enhanced_out)
+            ]
+            # Process through parent's inference method
+            y = self._inference(final_out)
+            return y if self.export else (y, final_out)
+
+
+class DWDecoupledHead(Detect):
+    """
+    Depthwise Separable Decoupled Head untuk efisiensi dan spesialisasi.
+    
+    Pisahkan jalur klasifikasi dan regresi menggunakan Depthwise Separable Convolution
+    untuk menjaga efisiensi tapi meningkatkan spesialisasi fitur.
+    
+    Architecture:
+    - Classification branch: DWConv + PointConv untuk klasifikasi
+    - Regression branch: DWConv + PointConv untuk regresi
+    - Separate paths untuk spesialisasi yang lebih baik
+    
+    Args:
+        nc (int): Number of classes
+        ch (tuple): Input channels for each detection layer
+    """
+    
+    def __init__(self, nc=80, ch=()):
+        """Initialize DWDecoupledHead with depthwise separable convolution."""
+        super().__init__(nc, ch)
+        from .conv import DWConv, Conv
+        
+        self.nc = nc
+        self.nl = len(ch)
+        self.reg_max = 16
+        self.no = nc + self.reg_max * 4
+        
+        # Decoupled branches: cls dan reg terpisah dengan DWConv
+        self.cls_branches = nn.ModuleList()
+        self.reg_branches = nn.ModuleList()
+        
+        for c in ch:
+            c2_cls = max(c, min(self.nc, 100))
+            c2_reg = max((16, c // 4, self.reg_max * 4))
+            
+            # Classification branch: DWConv + PointConv
+            cls_branch = nn.Sequential(
+                DWConv(c, c, k=3, s=1, d=1, act=True),
+                Conv(c, c2_cls, k=1, s=1, act=True),
+                DWConv(c2_cls, c2_cls, k=3, s=1, d=1, act=True),
+                nn.Conv2d(c2_cls, self.nc, 1)
+            )
+            self.cls_branches.append(cls_branch)
+            
+            # Regression branch: DWConv + PointConv
+            reg_branch = nn.Sequential(
+                DWConv(c, c, k=3, s=1, d=1, act=True),
+                Conv(c, c2_reg, k=1, s=1, act=True),
+                DWConv(c2_reg, c2_reg, k=3, s=1, d=1, act=True),
+                nn.Conv2d(c2_reg, 4 * self.reg_max, 1)
+            )
+            self.reg_branches.append(reg_branch)
+        
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+    
+    def forward(self, x):
+        """
+        Forward pass through DWDecoupledHead.
+        
+        Args:
+            x: List of feature tensors from detection layers
+        
+        Returns:
+            Training: List of concatenated [reg, cls] outputs
+            Inference: Processed predictions
+        """
+        outputs = []
+        for i, feat in enumerate(x):
+            # Separate cls and reg branches
+            cls_out = self.cls_branches[i](feat)
+            reg_out = self.reg_branches[i](feat)
+            
+            # Concatenate: [reg, cls] format
+            output = torch.cat([reg_out, cls_out], dim=1)
+            outputs.append(output)
+        
+        if self.training:
+            return outputs
+        
+        y = self._inference(outputs)
+        return y if self.export else (y, outputs)
+    
+    def bias_init(self):
+        """Initialize biases untuk DWDecoupledHead."""
+        m = self
+        for cls_b, reg_b, s in zip(m.cls_branches, m.reg_branches, m.stride):
+            reg_b[-1].bias.data[:] = 1.0  # box
+            cls_b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls

@@ -112,6 +112,11 @@ from .block import (
     FSNeck,
     DIFuse,
     SADHead,
+    AdaptiveFeatureFusion,
+    NoiseSuppression,
+    GlobalContextBlock,
+    LargeKernelConv,
+    BiFPN,
 )
 from .conv import (
     CBAM,
@@ -130,7 +135,7 @@ from .conv import (
     SpatialAttention,
     SPDConv,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead
 from .transformer import (
     AIFI,
     MLP,
@@ -271,4 +276,11 @@ __all__ = (
     "FSNeck",
     "DIFuse",
     "SADHead",
+    "AdaptiveFeatureFusion",
+    "NoiseSuppression",
+    "GlobalContextBlock",
+    "LargeKernelConv",
+    "BiFPN",
+    "SmallObjectEnhancementHead",
+    "DWDecoupledHead",
 )

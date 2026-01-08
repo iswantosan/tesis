@@ -124,6 +124,13 @@ from ultralytics.nn.modules import (
     FSNeck,
     DIFuse,
     SADHead,
+    AdaptiveFeatureFusion,
+    NoiseSuppression,
+    GlobalContextBlock,
+    LargeKernelConv,
+    BiFPN,
+    SmallObjectEnhancementHead,
+    DWDecoupledHead,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1216,18 +1223,74 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c_p2, c_p3_arg, c_out]
             else:
                 raise ValueError(f"CIB2 expects list of 2 layer indices in 'from', got {f}")
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, DecoupledP3Detect}:
+        elif m is AdaptiveFeatureFusion:
+            # AdaptiveFeatureFusion receives 2 inputs: [P5_upsampled, P4]
+            # Args: [c_out] where c_out is output channels
+            # Input channels are auto-inferred from f (list of 2 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c_p5 = ch[f[0]]  # P5 channels (upsampled)
+                c_p4 = ch[f[1]]  # P4 channels
+                c_out = args[0] if args else c_p4  # Output channels (default: P4 channels)
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c_p4, c_out]  # AFF takes (c1=P4, c2=output)
+            else:
+                raise ValueError(f"AdaptiveFeatureFusion expects list of 2 layer indices in 'from', got {f}")
+        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, Segment, Pose, OBB}:
+            if m in {Detect, Segment, Pose, OBB, SmallObjectEnhancementHead, DWDecoupledHead}:
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
-        elif m in {CBLinear, TorchVision, Index}:
+        elif m is Index:
+            # Index module: Extract element from list output
+            # Args: [index] where index is the list index to extract
+            # Input channels: from previous layer (which returns list)
+            c1 = ch[f]  # Input channels from previous layer (list output)
+            index = args[0] if args else 0  # Index to extract (default: 0)
+            # Index doesn't change channels, output = input[index]
+            args = [c1, c1, index]  # (c1, c2, index) where c2 = c1 (no change)
+        elif m in {CBLinear, TorchVision}:
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]
+        elif m is NoiseSuppression:
+            # NoiseSuppression needs (c1, ratio) where c1 is input channels and ratio is reduction ratio
+            c1 = ch[f]  # Input channels from previous layer
+            ratio = args[1] if len(args) > 1 else 4  # Ratio from args, default 4
+            args = [c1, ratio]
+        elif m is GlobalContextBlock:
+            # GlobalContextBlock needs (c1, c2, reduction) where c1 is input, c2 is output, reduction is ratio
+            c1 = ch[f]  # Input channels
+            c2 = args[0] if args else c1  # Output channels (default: same as input)
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            reduction = args[1] if len(args) > 1 else 4  # Reduction ratio (default: 4)
+            args = [c1, c2, reduction]
+        elif m is LargeKernelConv:
+            # LargeKernelConv needs (c1, c2, k, dilation)
+            c1 = ch[f]  # Input channels
+            c2 = args[0] if args else c1  # Output channels
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            k = args[1] if len(args) > 1 else 7  # Kernel size (default: 7)
+            dilation = args[2] if len(args) > 2 else 1  # Dilation (default: 1)
+            args = [c1, c2, k, dilation]
+        elif m is BiFPN:
+            # BiFPN receives 3 inputs: [P3, P4, P5]
+            # Args: [c_out] where c_out is output channels
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                c3 = ch[f[0]]  # P3 channels
+                c4 = ch[f[1]]  # P4 channels
+                c5 = ch[f[2]]  # P5 channels
+                c_out = args[0] if args else c4  # Output channels (default: P4 channels)
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c3, c4, c5, c_out]
+            else:
+                raise ValueError(f"BiFPN expects list of 3 layer indices in 'from', got {f}")
         elif m in {FBSB, FBSBE, FBSBMS, FBSBT}:
             # FBSB variants need (c1, c2) where c1 is input channels and c2 is output channels
             c2 = args[0] if args else ch[f]  # Output channels from args, or same as input if not specified

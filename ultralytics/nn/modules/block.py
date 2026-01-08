@@ -83,6 +83,11 @@ __all__ = (
     "FSNeck",
     "DIFuse",
     "SADHead",
+    "AdaptiveFeatureFusion",
+    "NoiseSuppression",
+    "GlobalContextBlock",
+    "LargeKernelConv",
+    "BiFPN",
 )
 
 
@@ -5434,3 +5439,356 @@ class SADHead(nn.Module):
         cls_penalized = cls_logits * (1 - self.beta * penalty_expanded)
         
         return cls_penalized
+
+
+class AdaptiveFeatureFusion(nn.Module):
+    """
+    Adaptive Feature Fusion (AFF) Block for learnable feature fusion.
+    
+    Ganti PAFPN biasa dengan fusion yang bisa "pilih" feature mana yang penting.
+    P4 & P5 di-fuse dengan weight yang learnable.
+    
+    Architecture:
+    - Upsample P5 ke size P4
+    - Adaptive weighted fusion: (w_p4 * P4 + w_p5 * P5_upsampled) / (w_p4 + w_p5)
+    - Fusion conv (1x1 + 3x3)
+    - Local context extractor (depthwise conv)
+    
+    Args:
+        c1 (int): P4 input channels (auto-inferred)
+        c2 (int): Output channels
+    """
+    
+    def __init__(self, c1, c2):
+        """Initialize AdaptiveFeatureFusion for learnable feature fusion."""
+        super().__init__()
+        from .conv import Conv
+        
+        # Learnable fusion weight
+        self.weight_p4 = nn.Parameter(torch.ones(1))
+        self.weight_p5 = nn.Parameter(torch.ones(1))
+        
+        # Upsampling untuk P5
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        
+        # Fusion conv
+        self.fusion_conv = nn.Sequential(
+            Conv(c1, c2, 1),
+            Conv(c2, c2, 3)
+        )
+        
+        # Local context extractor
+        self.context = nn.Sequential(
+            nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
+            nn.BatchNorm2d(c2),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(c2, c2, 1),
+        )
+    
+    def forward(self, x):
+        """
+        Forward pass through AdaptiveFeatureFusion.
+        
+        Args:
+            x: List of 2 tensors [P5, P4] (P5 first, then P4)
+               Note: In YAML, order is [P5_upsampled, P4], so we reverse it
+        
+        Returns:
+            Fused features with adaptive weights
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 2:
+            p5, p4 = x  # x comes as [P5_upsampled, P4] from YAML
+        else:
+            raise ValueError(f"AdaptiveFeatureFusion expects list of 2 tensors [P5, P4], got {type(x)}")
+        
+        # Upsample P5 ke size P4 (if not already upsampled)
+        _, _, h4, w4 = p4.shape
+        if p5.shape[2:] != (h4, w4):
+            p5_up = self.upsample(p5)
+        else:
+            p5_up = p5
+        
+        # Adaptive weighted fusion
+        w_sum = self.weight_p4 + self.weight_p5 + 1e-4
+        fused = (self.weight_p4 * p4 + self.weight_p5 * p5_up) / w_sum
+        
+        # Fusion conv
+        out = self.fusion_conv(fused)
+        
+        # Add local context
+        out = out + self.context(out)
+        
+        return out
+
+
+class NoiseSuppression(nn.Module):
+    """
+    Noise Suppression Block (NSB) untuk mengurangi activation noise di low-level features.
+    
+    Mengurangi activation noise di P4/P5 dengan dual attention mechanism:
+    - Channel attention: Deteksi feature channel mana yang noise
+    - Spatial attention: Deteksi region mana yang tidak penting
+    - Output = input × channel_mask × spatial_mask
+    
+    Architecture:
+    - Channel attention: AvgPool + MaxPool → MLP → Sigmoid
+    - Spatial attention: Mean + Max → Conv7x7 → Sigmoid
+    - Combined suppression: x * channel_mask * spatial_mask
+    
+    Args:
+        c1 (int): Input channels
+        ratio (int): Channel reduction ratio untuk MLP (default: 4)
+    """
+    
+    def __init__(self, c1, ratio=4):
+        """Initialize NoiseSuppressionBlock for noise suppression."""
+        super().__init__()
+        
+        # Channel attention untuk deteksi noise
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        
+        # MLP untuk generate suppression mask
+        self.mlp = nn.Sequential(
+            nn.Conv2d(c1*2, c1//ratio, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c1//ratio, c1, 1, bias=False)
+        )
+        
+        # Spatial attention
+        self.spatial_conv = nn.Sequential(
+            nn.Conv2d(2, 1, 7, padding=3, bias=False),
+            nn.Sigmoid()
+        )
+        
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        """
+        Forward pass through NoiseSuppressionBlock.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Suppressed features [B, C, H, W]
+        """
+        # Channel-wise suppression
+        avg_feat = self.avg_pool(x)
+        max_feat = self.max_pool(x)
+        channel_mask = self.sigmoid(
+            self.mlp(torch.cat([avg_feat, max_feat], 1))
+        )
+        
+        # Spatial suppression
+        avg_spatial = torch.mean(x, dim=1, keepdim=True)
+        max_spatial, _ = torch.max(x, dim=1, keepdim=True)
+        spatial_mask = self.spatial_conv(
+            torch.cat([avg_spatial, max_spatial], 1)
+        )
+        
+        # Combined suppression
+        x = x * channel_mask * spatial_mask
+        return x
+
+
+class GlobalContextBlock(nn.Module):
+    """
+    Global Context (GC) Block untuk context augmentation di backbone.
+    
+    Lebih ringan dari Self-Attention tapi efektif untuk mAP50 karena 
+    menangkap korelasi channel secara global.
+    
+    Architecture:
+    - Global Average Pooling (GAP)
+    - 1x1 Conv untuk context modeling
+    - 1x1 Conv untuk transform
+    - Broadcast dan add ke original features
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        reduction (int): Channel reduction ratio (default: 4)
+    """
+    
+    def __init__(self, c1, c2=None, reduction=4):
+        """Initialize GlobalContextBlock for global context modeling."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.c2 = c2
+        self.reduction = reduction
+        
+        # Global Average Pooling
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        
+        # Context modeling: 1x1 Conv untuk generate context
+        self.context_conv = nn.Sequential(
+            nn.Conv2d(c1, c1 // reduction, 1, bias=False),
+            nn.BatchNorm2d(c1 // reduction),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c1 // reduction, c2, 1, bias=False),
+            nn.BatchNorm2d(c2),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        """
+        Forward pass through GlobalContextBlock.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with global context [B, C2, H, W]
+        """
+        # Global Average Pooling
+        context = self.gap(x)  # [B, C1, 1, 1]
+        
+        # Context modeling
+        context = self.context_conv(context)  # [B, C2, 1, 1]
+        
+        # Broadcast dan multiply (bukan add, untuk gate mechanism)
+        out = x * context
+        
+        return out
+
+
+class LargeKernelConv(nn.Module):
+    """
+    Large Kernel Convolution untuk context augmentation.
+    
+    Ganti beberapa blok di stage terakhir backbone dengan Large Kernel (7x7 atau 9x9)
+    untuk membantu model "melihat" hubungan antar fitur yang berjauhan.
+    
+    Architecture:
+    - Large kernel conv (7x7 atau 9x9)
+    - Optional: Dilated convolution untuk larger receptive field
+    - BatchNorm + Activation
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size (default: 7, bisa 7 atau 9)
+        dilation (int): Dilation rate (default: 1, bisa 2 untuk larger RF)
+    """
+    
+    def __init__(self, c1, c2, k=7, dilation=1):
+        """Initialize LargeKernelConv for large receptive field."""
+        super().__init__()
+        from .conv import Conv
+        
+        padding = (k - 1) * dilation // 2
+        self.conv = nn.Sequential(
+            nn.Conv2d(c1, c2, k, stride=1, padding=padding, dilation=dilation, bias=False),
+            nn.BatchNorm2d(c2),
+            nn.SiLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        """Forward pass through LargeKernelConv."""
+        return self.conv(x)
+
+
+class BiFPN(nn.Module):
+    """
+    Weighted Bi-directional Feature Pyramid Network (BiFPN).
+    
+    Implement learnable weights saat melakukan fusion di Neck.
+    Model bisa milih fitur mana (P3, P4, atau P5) yang paling berkontribusi.
+    
+    Architecture:
+    - Top-down path: P5 → P4 → P3 dengan learnable weights
+    - Bottom-up path: P3 → P4 → P5 dengan learnable weights
+    - Each fusion uses weighted sum with learnable parameters
+    
+    Args:
+        c3 (int): P3 channels
+        c4 (int): P4 channels
+        c5 (int): P5 channels
+        c_out (int): Output channels (default: same as input)
+    """
+    
+    def __init__(self, c3, c4, c5, c_out=None):
+        """Initialize BiFPN for weighted bidirectional feature fusion."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c_out is None:
+            c_out = c4  # Default to P4 channels
+        
+        # Align channels
+        self.align_p3 = Conv(c3, c_out, k=1, s=1, act=True) if c3 != c_out else nn.Identity()
+        self.align_p4 = Conv(c4, c_out, k=1, s=1, act=True) if c4 != c_out else nn.Identity()
+        self.align_p5 = Conv(c5, c_out, k=1, s=1, act=True) if c5 != c_out else nn.Identity()
+        
+        # Learnable weights untuk top-down path
+        self.w_td_p5 = nn.Parameter(torch.ones(1))
+        self.w_td_p4 = nn.Parameter(torch.ones(1))
+        self.w_td_p3 = nn.Parameter(torch.ones(1))
+        
+        # Learnable weights untuk bottom-up path
+        self.w_bu_p3 = nn.Parameter(torch.ones(1))
+        self.w_bu_p4 = nn.Parameter(torch.ones(1))
+        self.w_bu_p5 = nn.Parameter(torch.ones(1))
+        
+        # Upsampling dan downsampling
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.downsample = nn.Conv2d(c_out, c_out, 3, stride=2, padding=1, bias=False)
+        
+        # Fusion convs
+        self.fusion_td_p4 = Conv(c_out * 2, c_out, k=3, s=1, act=True)
+        self.fusion_td_p3 = Conv(c_out * 2, c_out, k=3, s=1, act=True)
+        self.fusion_bu_p4 = Conv(c_out * 2, c_out, k=3, s=1, act=True)
+        self.fusion_bu_p5 = Conv(c_out * 2, c_out, k=3, s=1, act=True)
+    
+    def forward(self, x):
+        """
+        Forward pass through BiFPN.
+        
+        Args:
+            x: List of 3 tensors [P3, P4, P5]
+        
+        Returns:
+            List of enhanced features [P3, P4, P5]
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 3:
+            p3, p4, p5 = x
+        else:
+            raise ValueError(f"BiFPN expects list of 3 tensors [P3, P4, P5], got {type(x)}")
+        
+        # Align channels
+        p3 = self.align_p3(p3)
+        p4 = self.align_p4(p4)
+        p5 = self.align_p5(p5)
+        
+        # Top-down path: P5 → P4 → P3
+        # P4 enhanced
+        p5_up = self.upsample(p5)
+        w_sum_td_p4 = self.w_td_p5 + self.w_td_p4 + 1e-4
+        p4_td = (self.w_td_p5 * p5_up + self.w_td_p4 * p4) / w_sum_td_p4
+        p4_td = self.fusion_td_p4(torch.cat([p5_up, p4], dim=1))
+        
+        # P3 enhanced
+        p4_td_up = self.upsample(p4_td)
+        w_sum_td_p3 = self.w_td_p4 + self.w_td_p3 + 1e-4
+        p3_td = (self.w_td_p4 * p4_td_up + self.w_td_p3 * p3) / w_sum_td_p3
+        p3_td = self.fusion_td_p3(torch.cat([p4_td_up, p3], dim=1))
+        
+        # Bottom-up path: P3 → P4 → P5
+        # P4 enhanced
+        p3_td_down = self.downsample(p3_td)
+        w_sum_bu_p4 = self.w_bu_p3 + self.w_bu_p4 + 1e-4
+        p4_bu = (self.w_bu_p3 * p3_td_down + self.w_bu_p4 * p4_td) / w_sum_bu_p4
+        p4_bu = self.fusion_bu_p4(torch.cat([p3_td_down, p4_td], dim=1))
+        
+        # P5 enhanced
+        p4_bu_down = self.downsample(p4_bu)
+        w_sum_bu_p5 = self.w_bu_p4 + self.w_bu_p5 + 1e-4
+        p5_bu = (self.w_bu_p4 * p4_bu_down + self.w_bu_p5 * p5) / w_sum_bu_p5
+        p5_bu = self.fusion_bu_p5(torch.cat([p4_bu_down, p5], dim=1))
+        
+        return [p3_td, p4_bu, p5_bu]
