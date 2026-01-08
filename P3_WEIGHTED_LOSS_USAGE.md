@@ -130,3 +130,9 @@ print(f"mAP50-95: {metrics.box.map}")
 - **Bisa dikombinasikan dengan blocks lain** (BGSuppressP3, DecoupledP3Detect, dll)
 - **Auto-enabled** jika `p3_weight > 1.0` di hyperparameters
 
+
+
+
+
+
+

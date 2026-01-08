@@ -1,7 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
-# YOLO12 Lightweight: FBSB + SPDConv + DPRB
-# Best Recall: 0.821 (DPRB) + FBSB mAP50-95 (0.444) + SPDConv untuk small objects
-# Hati-hati OOM: Lebih ringan dari DeformableHead
+# YOLO12 Balanced: FBSBMS + SPDConv + SOE
+# Best Precision: 0.815 (FBSBMS) + SOE (0.87 mAP50, 0.437 mAP50-95) + SPDConv untuk small objects
 
 # Parameters
 nc: 80 # number of classes
@@ -26,28 +25,29 @@ backbone:
   - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
   - [-1, 4, A2C2f, [1024, True, 1]] # 8
 
-# YOLO12n head - Lightweight: FBSB + SPDConv + DPRB
+# YOLO12n head - Balanced: FBSBMS + SPDConv + ASFF
 head:
   # Top-down path (FPN)
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 6], 1, Concat, [1]] # cat backbone P4
   - [-1, 2, A2C2f, [512, False, -1]] # 11
-  - [-1, 1, FBSB, [512]] # FBSB: Best mAP50-95 (0.444)
+  - [-1, 1, FBSBMS, [512]] # FBSBMS: Best Precision (0.815)
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
   - [-1, 2, A2C2f, [256, False, -1]] # 14
-  - [-1, 1, FBSB, [256]] # FBSB untuk P3
-  - [-1, 1, DPRB, [256]] # DPRB: Best Recall (0.821) - dense refinement
+  - [-1, 1, FBSBMS, [256]] # FBSBMS untuk P3
 
   # Bottom-up path (PAN) - SPDConv untuk small object preservation
   - [-1, 1, SPDConv, [256, 3, 2]] # SPDConv preserve small object info (P3->P4)
-  - [[-1, 12], 1, Concat, [1]] # cat head P4 (layer 12 = P4 setelah FBSB)
+  - [[-1, 12], 1, Concat, [1]] # cat head P4 (layer 12 = P4 setelah FBSBMS)
   - [-1, 2, A2C2f, [512, False, -1]] # 17
-  - [-1, 1, DPRB, [512]] # DPRB untuk P4
+  - [-1, 1, SOE, [512]] # SOE: 0.801, 0.787, 0.87, 0.437 (small object enhancement)
 
   - [-1, 1, SPDConv, [512, 3, 2]] # SPDConv untuk P4->P5
   - [[-1, 8], 1, Concat, [1]] # cat head P5
   - [-1, 2, C3k2, [1024, True]] # 20 (P5/32-large)
+  - [-1, 1, SOE, [1024]] # SOE untuk P5
 
-  - [[16, 19, 20], 1, Detect, [nc]] # Detect(P3, P4, P5)
+  - [[16, 18, 21], 1, Detect, [nc]] # Detect(P3, P4, P5)
+

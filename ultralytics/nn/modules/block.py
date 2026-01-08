@@ -5250,36 +5250,21 @@ class DIFuse(nn.Module):
         if c_out is None:
             c_out = c_p3
         
+        self.c_p2_expected = c_p2
+        self.c_p3_expected = c_p3
+        self.c_out = c_out
         self.gate_from_p3 = gate_from_p3
+        self.alpha_init = alpha_init
+        self._initialized = False
         
-        # P2 → P3: Downsample and channel alignment
-        self.p2_to_p3 = nn.Sequential(
-            Conv(c_p2, c_p3, k=3, s=2, act=True),  # Downsample stride=2
-            Conv(c_p3, c_p3, k=1, s=1, act=True)   # Channel alignment
-        )
+        # Will be initialized lazily in first forward pass with actual channels
+        self.p2_align = None
+        self.p2_downsample = None
+        self.gate_conv = None
+        self.proj = None
         
-        # Gate: learnable attention to control injection
-        if gate_from_p3:
-            # Gate computed from P3 (safer, P3 already processed)
-            self.gate_conv = nn.Sequential(
-                Conv(c_p3, c_p3, k=1, s=1, act=False),
-                nn.Sigmoid()
-            )
-        else:
-            # Gate computed from P2toP3 (more direct)
-            self.gate_conv = nn.Sequential(
-                Conv(c_p3, c_p3, k=1, s=1, act=False),
-                nn.Sigmoid()
-            )
-        
-        # Learnable fusion weight (alpha)
+        # Learnable fusion weight (alpha) - always initialized
         self.alpha = nn.Parameter(torch.tensor(alpha_init))
-        
-        # Output projection if needed
-        if c_p3 != c_out:
-            self.proj = Conv(c_p3, c_out, k=1, s=1, act=True)
-        else:
-            self.proj = None
     
     def forward(self, x):
         """
@@ -5296,10 +5281,54 @@ class DIFuse(nn.Module):
         else:
             raise ValueError(f"DIFuse expects list of 2 tensors [P3, P2], got {type(x)}")
         
-        # P2 → P3: Downsample and align
-        p2_to_p3 = self.p2_to_p3(p2)
+        # Auto-detect actual channels from input tensors (handle width scaling)
+        _, c_p2_actual, _, _ = p2.shape
+        _, c_p3_actual, _, _ = p3.shape
         
-        # Ensure spatial match (safety check)
+        # Lazy initialization with actual channels
+        if not self._initialized or c_p2_actual != self.c_p2_expected or c_p3_actual != self.c_p3_expected:
+            from .conv import Conv
+            
+            # Update expected channels
+            self.c_p2_expected = c_p2_actual
+            self.c_p3_expected = c_p3_actual
+            
+            # P2 → P3: Channel alignment first, then downsample
+            self.p2_align = Conv(c_p2_actual, c_p3_actual, k=1, s=1, act=True).to(p2.device)
+            self.p2_downsample = Conv(c_p3_actual, c_p3_actual, k=3, s=2, act=True).to(p2.device)
+            
+            # Register as submodules so parameters are tracked
+            self.add_module('p2_align', self.p2_align)
+            self.add_module('p2_downsample', self.p2_downsample)
+            
+            # Gate: learnable attention to control injection
+            if self.gate_from_p3:
+                self.gate_conv = nn.Sequential(
+                    Conv(c_p3_actual, c_p3_actual, k=1, s=1, act=False),
+                    nn.Sigmoid()
+                ).to(p3.device)
+            else:
+                self.gate_conv = nn.Sequential(
+                    Conv(c_p3_actual, c_p3_actual, k=1, s=1, act=False),
+                    nn.Sigmoid()
+                ).to(p2.device)
+            
+            self.add_module('gate_conv', self.gate_conv)
+            
+            # Output projection if needed
+            if c_p3_actual != self.c_out:
+                self.proj = Conv(c_p3_actual, self.c_out, k=1, s=1, act=True).to(p3.device)
+                self.add_module('proj', self.proj)
+            else:
+                self.proj = None
+            
+            self._initialized = True
+        
+        # P2 → P3: Channel alignment and downsample
+        p2_aligned = self.p2_align(p2)
+        p2_to_p3 = self.p2_downsample(p2_aligned)
+        
+        # Ensure spatial match (safety check - handle case where stride=2 doesn't exactly match)
         _, _, h3, w3 = p3.shape
         if p2_to_p3.shape[2:] != (h3, w3):
             p2_to_p3 = F.interpolate(p2_to_p3, size=(h3, w3), mode='bilinear', align_corners=False)

@@ -121,6 +121,9 @@ from ultralytics.nn.modules import (
     CrossScaleSuppression,
     MultiScaleEdgeEnhancement,
     BGSuppressP3,
+    FSNeck,
+    DIFuse,
+    SADHead,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1408,6 +1411,51 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1 = ch[f]  # Input channels from previous layer
             use_simam = args[1] if len(args) > 1 else True  # Use SimAM or sigmoid
             args = [c1, c2, use_simam]
+        elif m is DIFuse:
+            # DIFuse receives 2 inputs: [P3, P2]
+            # Args: [c_p2, c_p3, c_out, alpha_init, gate_from_p3] or [c_p2, c_p3] or empty
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c_p3 = ch[f[0]]  # P3 channels (first input)
+                c_p2 = ch[f[1]]  # P2 channels (second input)
+                # Parse args: [c_p2, c_p3, c_out, alpha_init, gate_from_p3]
+                if args and len(args) >= 2:
+                    c_p2_arg = args[0]  # P2 channels from args
+                    c_p3_arg = args[1]  # P3 channels from args
+                    c_out = args[2] if len(args) > 2 else c_p3_arg  # Output channels (default: P3)
+                elif args and len(args) == 1:
+                    # If only one arg, assume it's c_out and use inferred channels
+                    c_p2_arg = c_p2
+                    c_p3_arg = c_p3
+                    c_out = args[0]
+                else:
+                    # No args: use inferred channels
+                    c_p2_arg = c_p2
+                    c_p3_arg = c_p3
+                    c_out = c_p3_arg
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                alpha_init = args[3] if args and len(args) > 3 else 0.1  # Alpha init (default: 0.1)
+                gate_from_p3 = args[4] if args and len(args) > 4 else True  # Gate from P3 (default: True)
+                args = [c_p2_arg, c_p3_arg, c_out, alpha_init, gate_from_p3]
+                c2 = c_out  # Output channels
+            else:
+                raise ValueError(f"DIFuse expects list of 2 layer indices in 'from', got {f}")
+        elif m is FSNeck:
+            # FSNeck needs (c1, c2, kernel_size, use_avgpool)
+            c2 = args[0] if args else ch[f]  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            c1 = ch[f]  # Input channels from previous layer
+            kernel_size = args[1] if len(args) > 1 else 7  # Kernel size (default: 7)
+            use_avgpool = args[2] if len(args) > 2 else False  # Use AvgPool (default: False)
+            args = [c1, c2, kernel_size, use_avgpool]
+        elif m is SADHead:
+            # SADHead needs (c1, reg_max, beta_init)
+            c1 = ch[f]  # Input channels from previous layer
+            reg_max = args[0] if args else 16  # Reg max (default: 16)
+            beta_init = args[1] if len(args) > 1 else 0.5  # Beta init (default: 0.5)
+            args = [c1, reg_max, beta_init]
+            c2 = c1  # Output channels same as input (SADHead returns features + penalty)
         elif m is CBFuse:
             c2 = ch[f[-1]]
         else:
