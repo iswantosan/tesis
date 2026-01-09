@@ -23,7 +23,8 @@ __all__ = (
     "RepConv",
     "Index",
     "SPDConv",
-    "SmallObjectBlock"
+    "SmallObjectBlock",
+    "DendriticConv2d"
 )
 
 
@@ -394,3 +395,80 @@ class SPDConv(nn.Module):
         )
         # Apply convolution (stride=1, spatial size already reduced by split)
         return self.conv(x)
+
+
+class DendriticConv2d(nn.Module):
+    """
+    Dendritic Convolution: Multi-branch convolution with gating mechanism.
+    
+    Architecture:
+    - Multiple parallel conv branches (B branches)
+    - Each branch: Conv2d -> BN -> Activation
+    - Gate network: Generates per-branch weights via pooling + MLP
+    - Fuse: Weighted sum of branch outputs
+    
+    Drop-in replacement for Conv2d, especially effective for:
+    - Noisy input (early backbone)
+    - Feature fusion (neck)
+    - Small object detection
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride (default: 1)
+        p (int): Padding (auto-calculated if None)
+        g (int): Groups (default: 1)
+        branches (int): Number of parallel branches (default: 4)
+        act (bool): Activation (default: True)
+    """
+    
+    default_act = nn.SiLU()  # default activation
+    
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, branches=4, act=True):
+        """Initialize DendriticConv2d with multiple branches and gating."""
+        super().__init__()
+        self.branches = branches
+        
+        # Create B parallel branches: Conv -> BN -> Act
+        self.branch_convs = nn.ModuleList()
+        for _ in range(branches):
+            branch = nn.Sequential(
+                nn.Conv2d(c1, c2, k, s, autopad(k, p), groups=g, bias=False),
+                nn.BatchNorm2d(c2),
+                self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+            )
+            self.branch_convs.append(branch)
+        
+        # Gate network: Pooling -> MLP -> Sigmoid
+        # Input: pooled features -> Output: (N, B, 1, 1) gate weights
+        self.gate_pool = nn.AdaptiveAvgPool2d(1)  # Global average pooling
+        self.gate_mlp = nn.Sequential(
+            nn.Conv2d(c1, c1 // 4, 1, bias=False),  # Reduce channels
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c1 // 4, branches, 1, bias=False),  # Output B gates
+            nn.Sigmoid()  # Gate weights
+        )
+    
+    def forward(self, x):
+        """
+        Forward pass through DendriticConv2d.
+        
+        Args:
+            x: Input tensor [N, C1, H, W]
+        
+        Returns:
+            Output tensor [N, C2, H', W'] where H', W' depend on stride
+        """
+        # Generate branch features
+        branch_feats = [branch(x) for branch in self.branch_convs]  # List of [N, C2, H', W']
+        
+        # Generate gate weights: (N, B, 1, 1)
+        pooled = self.gate_pool(x)  # [N, C1, 1, 1]
+        gates = self.gate_mlp(pooled)  # [N, B, 1, 1]
+        
+        # Weighted sum: sum(gates[:, b] * branch_feats[b] for b in range(B))
+        # gates[:, b] shape: [N, 1, 1, 1] -> broadcast to [N, C2, H', W']
+        output = sum(gates[:, b:b+1, :, :] * branch_feats[b] for b in range(self.branches))
+        
+        return output

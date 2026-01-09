@@ -134,6 +134,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
     SPDConv,
+    DendriticConv2d,
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead
 from .transformer import (
