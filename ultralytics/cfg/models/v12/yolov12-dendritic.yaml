@@ -24,8 +24,9 @@ scales: # model compound scaling constants
 backbone:
   # [from, repeats, module, args]
   - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
-  - [-1, 1, DendriticConv2d, [128, 3, 2, None, 1, 1, 4]] # 1-P2/4: DendriticConv untuk noisy input (4 branches)
+  - [-1, 1, DendriticConv2d, [128, 3, 2, None, 1, 4]] # 1-P2/4: DendriticConv untuk noisy input (4 branches)
   # Args: [c2, k, s, p, g, branches] = [128, 3, 2, None, 1, 4]
+  # parse_model akan prepend c1, jadi final args = [c1, 128, 3, 2, None, 1, 4]
   - [-1, 2, C3k2, [256, False, 0.25]]
   - [-1, 1, Conv, [256, 3, 2, 1, 4]] # 3-P3/8
   - [-1, 2, C3k2, [512, False, 0.25]]
@@ -40,8 +41,9 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 9
   - [[-1, 6], 1, Concat, [1]] # 10 cat backbone P4
   - [-1, 1, SpatialAttention, [7]] # 11 Spatial attention setelah Concat P4
-  - [-1, 1, DendriticConv2d, [512, 3, 1, None, 1, 1, 4]] # 12 DendriticConv di P4 neck (noise suppression saat fusion)
+  - [-1, 1, DendriticConv2d, [512, 3, 1, None, 1, 4]] # 12 DendriticConv di P4 neck (noise suppression saat fusion)
   # Args: [c2, k, s, p, g, branches] = [512, 3, 1, None, 1, 4]
+  # parse_model akan prepend c1, jadi final args = [c1, 512, 3, 1, None, 1, 4]
   - [-1, 2, A2C2f, [512, False, -1]] # 13 P4 refine
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14
