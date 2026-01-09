@@ -137,6 +137,12 @@ from .conv import (
     DendriticConv2d,
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead
+from .noise_robust import (
+    NoiseMapLayer,
+    AdaptiveConv2d,
+    AdaptiveMaxPool2d,
+    AdaptiveAvgPool2d,
+)
 from .transformer import (
     AIFI,
     MLP,
@@ -284,4 +290,8 @@ __all__ = (
     "BiFPN",
     "SmallObjectEnhancementHead",
     "DWDecoupledHead",
+    "NoiseMapLayer",
+    "AdaptiveConv2d",
+    "AdaptiveMaxPool2d",
+    "AdaptiveAvgPool2d",
 )
