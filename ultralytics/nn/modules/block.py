@@ -80,6 +80,8 @@ __all__ = (
     "CrossScaleSuppression",
     "MultiScaleEdgeEnhancement",
     "BGSuppressP3",
+    "LocalContrastGate",
+    "ShapeGate",
     "FSNeck",
     "DIFuse",
     "SADHead",
@@ -4743,6 +4745,135 @@ class BackgroundSuppressionGate(nn.Module):
             x = self.proj(x)
         
         return x
+
+
+class LocalContrastGate(nn.Module):
+    """
+    Local Contrast Gate: Suppress homogeneous texture, enhance local anomalies (small objects).
+    
+    Konsep:
+    - Texture = statistik lokal konsisten (homogen)
+    - Objek kecil = outlier lokal (kontras tinggi)
+    - Local mean = AvgPool (texture pattern)
+    - Contrast = x - local_mean (anomaly signal)
+    - Output = x + alpha * contrast (enhance anomaly)
+    
+    Keuntungan:
+    - Tidak learn parameter → stabil
+    - Tidak nambah compute berat
+    - Secara eksplisit menghukum texture homogen
+    - Lebih efektif dari attention untuk stain-heavy cases
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        k (int): Kernel size for local averaging (default: 5)
+        alpha (float): Contrast enhancement strength (default: 0.7)
+    """
+    
+    def __init__(self, c1, k=5, alpha=0.7, c2=None):
+        """Initialize Local Contrast Gate."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Local averaging (low-pass filter untuk detect texture)
+        self.avg = nn.AvgPool2d(k, stride=1, padding=k//2)
+        self.alpha = alpha
+        
+        # Output projection if channels differ
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+    
+    def forward(self, x):
+        """
+        Forward pass through Local Contrast Gate.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with suppressed texture and enhanced local anomalies
+        """
+        identity = x
+        
+        # Local mean (texture pattern)
+        local_mean = self.avg(x)
+        
+        # Contrast = anomaly signal (x - local_mean)
+        contrast = x - local_mean
+        
+        # Enhance contrast: x + alpha * contrast
+        out = x + self.alpha * contrast
+        
+        # Project if needed
+        if self.proj is not None:
+            out = self.proj(out)
+        
+        return out
+
+
+class ShapeGate(nn.Module):
+    """
+    Shape Gate: Enhance edges/structure for rod-like objects, not color/texture.
+    
+    Konsep:
+    - Depthwise conv → fokus spatial (edge detection)
+    - Pointwise conv → output projection
+    - Residual: x + edge → enhance edge signal
+    - Tidak pakai Sobel eksplisit (stabil gradient, CNN-friendly)
+    
+    Keuntungan:
+    - Depthwise → fokus spatial (bukan channel)
+    - Tidak pakai Sobel eksplisit (stabil gradien)
+    - CNN-friendly
+    - Cocok untuk rod/elongated objects
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+    """
+    
+    def __init__(self, c1, c2=None):
+        """Initialize Shape Gate."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        # Depthwise conv for edge detection (fokus spatial)
+        self.dw = nn.Conv2d(c1, c1, 3, padding=1, groups=c1, bias=False)
+        
+        # Pointwise conv for output projection
+        self.pw = Conv(c1, c2, k=1, s=1, act=True)
+    
+    def forward(self, x):
+        """
+        Forward pass through Shape Gate.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Features with enhanced edge/structure signal
+        """
+        identity = x
+        
+        # Edge detection via depthwise conv
+        edge = self.dw(x)
+        
+        # Enhance edge: x + edge
+        out = identity + edge
+        
+        # Pointwise projection
+        out = self.pw(out)
+        
+        return out
 
 
 class BGSuppressP3(nn.Module):

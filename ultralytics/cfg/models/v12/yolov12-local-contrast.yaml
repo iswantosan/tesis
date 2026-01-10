@@ -1,0 +1,139 @@
+# YOLOv12-Local-Contrast 🚀, AGPL-3.0 license
+# YOLOv12 optimized for single class detection with texture/background suppression
+# 
+# Strategy: FOCUS ON LOCAL CONTRAST, not global context
+# - Local Contrast Gate: Suppress homogeneous texture, enhance local anomalies (small objects)
+# - Shape Gate: Enhance edges/structure for rod-like objects
+# - P3-only decoupling: Separate feature paths for small objects
+# 
+# Expected: Better mAP50 by reducing false positives + improving small object detection
+# 
+# NOTE: LocalContrastGate perlu diimplement sebagai module baru (lihat komentar di bawah)
+# Atau bisa pakai BackgroundSuppressionGate sebagai alternatif sementara
+
+# Parameters
+nc: 1 # number of classes (single class detection)
+scales: # model compound scaling constants
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+# YOLO12-turbo backbone (clean, no suppression here)
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,  [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv,  [128, 3, 2, 1, 2]] # 1-P2/4
+  - [-1, 2, C3k2,  [256, False, 0.25]]
+  - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 3-P3/8
+  - [-1, 2, C3k2,  [512, False, 0.25]] # 4-P3 backbone output
+  - [-1, 1, Conv,  [512, 3, 2]] # 5-P4/16
+  - [-1, 4, A2C2f, [512, True, 4]] # 6-P4 output
+  - [-1, 1, Conv,  [1024, 3, 2]] # 7-P5/32
+  - [-1, 4, A2C2f, [1024, True, 1]] # 8-P5 output
+
+# YOLO12-turbo head with Local Contrast + Shape Enhancement
+head:
+  # Top-down path (FPN)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 9-Upsample P5 to P4 size
+  - [[-1, 6], 1, Concat, [1]] # 10-Concat P5_upsampled + P4_backbone
+  - [-1, 2, A2C2f, [512, False, -1]] # 11-P4 neck
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 12-Upsample P4 to P3 size
+  - [[-1, 4], 1, Concat, [1]] # 13-Concat P4_neck + P3_backbone
+  - [-1, 2, A2C2f, [256, False, -1]] # 14-P3 neck
+  
+  # ✅ IDE 1: Local Contrast Gate @ HeadP3 (WAJIB)
+  # Suppress homogeneous texture, enhance local anomalies
+  # k=5, alpha=0.7 (tidak learn parameter, hanya AvgPool + contrast)
+  - [-1, 1, LocalContrastGate, [256, 5, 0.7]] # 15-Local Contrast: Suppress texture @P3 (c1=256, k=5, alpha=0.7)
+  # Alternatif: [256] saja (k=5, alpha=0.7 default) atau [256, 7] untuk kernel lebih besar
+  
+  # ✅ IDE 2: Shape Gate @ HeadP3 (setelah P3 refine)
+  # Enhance edges/structure for rod-like objects
+  # Depthwise → fokus spatial, tidak pakai Sobel eksplisit (CNN-friendly)
+  - [-1, 1, ShapeGate, [256]] # 16-Shape Gate: Edge enhancement untuk rod objects
+  
+  # Optional: Tambahan suppression di P4 PAN (opsional, bisa dihapus)
+  - [-1, 1, Conv, [256, 3, 2]] # 17-Downsample P3 to P4 size
+  - [[-1, 11], 1, Concat, [1]] # 18-Concat P3_downsampled + P4_neck
+  - [-1, 2, A2C2f, [512, False, -1]] # 19-P4 final
+  # Opsional: Local Contrast juga di P4 PAN (uncomment jika perlu)
+  # - [-1, 1, BackgroundSuppressionGate, [512, 5]] # P4 local contrast (optional)
+
+  - [-1, 1, Conv, [512, 3, 2]] # 20-Downsample P4 to P5 size
+  - [[-1, 8], 1, Concat, [1]] # 21-Concat P4_downsampled + P5_backbone
+  - [-1, 2, C3k2, [1024, True]] # 22-P5 final
+
+  # ✅ IDE 4: P3-only Decoupling (REALISTIS)
+  # Separate cls/reg branches untuk P3 saja (small objects), P4/P5 tetap normal
+  # DecoupledP3Detect: P3 pakai separate branches, P4/P5 pakai shared head
+  - [[16, 19, 22], 1, DecoupledP3Detect, [nc]] # 23-DecoupledP3Detect: Detect(P3, P4, P5)
+
+# ============================================================================
+# IMPLEMENTASI MODULE BARU YANG DIPERLUKAN:
+# ============================================================================
+# 
+# 1. LocalContrastGate (REKOMENDASI - lebih tepat dari BackgroundSuppressionGate)
+#    class LocalContrastGate(nn.Module):
+#        def __init__(self, c1, c2=None, k=5, alpha=0.7):
+#            super().__init__()
+#            self.avg = nn.AvgPool2d(k, stride=1, padding=k//2)
+#            self.alpha = alpha
+#            if c2 is None: c2 = c1
+#            if c1 != c2:
+#                self.proj = Conv(c1, c2, k=1, s=1, act=True)
+#            else:
+#                self.proj = None
+#        
+#        def forward(self, x):
+#            identity = x
+#            local_mean = self.avg(x)
+#            contrast = x - local_mean  # Local anomaly detection
+#            out = x + self.alpha * contrast  # Enhance contrast
+#            if self.proj:
+#                out = self.proj(out)
+#            return out
+# 
+#    Keuntungan:
+#    - Tidak learn parameter → stabil
+#    - Tidak nambah compute berat
+#    - Secara eksplisit menghukum texture homogen
+#    - Lebih efektif dari attention untuk stain-heavy cases
+# 
+# 2. ShapeGate (sudah ada EdgePriorBlock, tapi bisa dibuat lebih sederhana)
+#    class ShapeGate(nn.Module):
+#        def __init__(self, c1, c2=None):
+#            super().__init__()
+#            self.dw = nn.Conv2d(c1, c1, 3, padding=1, groups=c1, bias=False)
+#            self.pw = nn.Conv2d(c1, c2 or c1, 1)
+#        
+#        def forward(self, x):
+#            edge = self.dw(x)  # Depthwise → fokus spatial
+#            return self.pw(x + edge)  # Enhance edge signal
+# 
+#    Keuntungan:
+#    - Depthwise → fokus spatial (tidak pakai Sobel eksplisit)
+#    - CNN-friendly (stabil gradient)
+#    - Cocok untuk rod/elongated objects
+# 
+# ============================================================================
+# TRAINING RECOMMENDATIONS:
+# ============================================================================
+# 
+# ✅ IDE 3: FP Confidence Dampener (LOSS-SIDE, bukan module)
+# Tambahkan ke training hyperparameters atau loss function:
+# 
+# fp_weight = torch.sigmoid(pred_obj)  # Semakin yakin, semakin dihukum
+# loss_cls = loss_cls * (1 + beta * fp_weight)  # beta = 1.0-2.0
+# 
+# Ini langsung menurunkan FP tanpa ubah model arsitektur.
+# 
+# P3-weighted loss (recommended untuk small objects):
+# p3_weight: 1.5  # P3 gets more weight
+# p4_weight: 1.0
+# p5_weight: 1.0
+# 
+# ============================================================================
