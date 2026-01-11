@@ -137,6 +137,10 @@ from ultralytics.nn.modules import (
     EMA,
     EMA_Bottleneck,
     C3_EMA,
+    EMA_Plus,
+    C3_EMA_Enhanced,
+    CrossLevelAttention,
+    PANPlus,
     SmallObjectEnhancementHead,
     DWDecoupledHead,
 )
@@ -1248,6 +1252,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c_p4, c_out]  # AFF takes (c1=P4, c2=output)
             else:
                 raise ValueError(f"AdaptiveFeatureFusion expects list of 2 layer indices in 'from', got {f}")
+        elif m is PANPlus:
+            # PANPlus receives 3 inputs: [P5, P4, P3] from backbone
+            # Args: [channels_list, nc, reg_max] where channels_list will be replaced with actual channels
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                channels_list = [ch[x] for x in f]  # Get channels from input layers [P5, P4, P3] (reverse order)
+                num_classes = args[0] if args else 80  # Number of classes
+                reg_max = args[1] if len(args) > 1 else 16  # Reg max
+                args = [channels_list, num_classes, reg_max]
+                # PANPlus returns list of outputs, but we need c2 for ch.append
+                # Use the first output channel (P3 output has reg_max*4 + nc channels)
+                c2 = 4 * reg_max + num_classes
+            else:
+                raise ValueError(f"PANPlus expects list of 3 layer indices in 'from', got {f}")
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead}:
             args.append([ch[x] for x in f])
             if m is Segment:

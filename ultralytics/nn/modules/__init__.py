@@ -122,6 +122,10 @@ from .block import (
     EMA,
     EMA_Bottleneck,
     C3_EMA,
+    EMA_Plus,
+    C3_EMA_Enhanced,
+    CrossLevelAttention,
+    PANPlus,
 )
 from .conv import (
     CBAM,
@@ -298,6 +302,10 @@ __all__ = (
     "EMA",
     "EMA_Bottleneck",
     "C3_EMA",
+    "EMA_Plus",
+    "C3_EMA_Enhanced",
+    "CrossLevelAttention",
+    "PANPlus",
     "SmallObjectEnhancementHead",
     "DWDecoupledHead",
     "NoiseMapLayer",
