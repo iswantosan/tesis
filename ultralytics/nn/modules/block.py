@@ -809,10 +809,8 @@ class EMA(nn.Module):
         # Residual
         identity = x
 
-        # Group-wise processing
-        x_grouped = x.view(b * self.groups, -1, h, w)
-        x_grouped = self.gn(x_grouped)
-        x = x_grouped.view(b, c, h, w)
+        # Group normalization (applied directly, GroupNorm handles grouping internally)
+        x = self.gn(x)
 
         # Channel attention
         y = self.avg_pool(x)  # [b, c, 1, 1]
