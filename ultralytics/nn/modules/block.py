@@ -90,6 +90,9 @@ __all__ = (
     "GlobalContextBlock",
     "LargeKernelConv",
     "BiFPN",
+    "EMA",
+    "EMA_Bottleneck",
+    "C3_EMA",
 )
 
 
@@ -782,6 +785,86 @@ class C3k(C3):
         c_ = int(c2 * e)  # hidden channels
         # self.m = nn.Sequential(*(RepBottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
         self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
+
+
+class EMA(nn.Module):
+    """Efficient Multi-scale Attention for YOLO - Lightweight"""
+
+    def __init__(self, channels, factor=32):
+        super().__init__()
+        self.groups = max(1, channels // factor)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        # 1D convolution for channel interaction
+        self.ca = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
+
+        # Group normalization for stability
+        self.gn = nn.GroupNorm(self.groups, channels)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        # Residual
+        identity = x
+
+        # Group-wise processing
+        x_grouped = x.view(b * self.groups, -1, h, w)
+        x_grouped = self.gn(x_grouped)
+        x = x_grouped.view(b, c, h, w)
+
+        # Channel attention
+        y = self.avg_pool(x)  # [b, c, 1, 1]
+        y = y.squeeze(-1).transpose(-1, -2)  # [b, 1, c]
+        y = self.ca(y)  # 1D conv
+        y = self.sigmoid(y)
+        y = y.transpose(-1, -2).unsqueeze(-1)  # [b, c, 1, 1]
+
+        return identity * y.expand_as(x)
+
+
+class EMA_Bottleneck(nn.Module):
+    """Bottleneck with EMA Attention"""
+
+    def __init__(self, c1, c2, shortcut=True, g=1):
+        super().__init__()
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_, c2, 3, 1, g=g)
+        self.add = shortcut and c1 == c2
+        self.ema = EMA(c2)  # EMA Attention
+
+    def forward(self, x):
+        out = self.cv2(self.cv1(x))
+        out = self.ema(out)  # Apply EMA attention
+        return x + out if self.add else out
+
+
+class C3_EMA(nn.Module):
+    """C3 with EMA Attention in bottleneck - Enhanced version of C3k2"""
+
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+
+        # Convolution layers
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)
+
+        # EMA Attention-enhanced bottlenecks
+        self.m = nn.Sequential(
+            *[EMA_Bottleneck(c_, c_, shortcut, g) for _ in range(n)]
+        )
+
+    def forward(self, x):
+        return self.cv3(
+            torch.cat(
+                (self.m(self.cv1(x)), self.cv2(x)),
+                dim=1
+            )
+        )
 
 
 class RepVGGDW(torch.nn.Module):

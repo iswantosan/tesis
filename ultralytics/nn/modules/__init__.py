@@ -119,6 +119,9 @@ from .block import (
     GlobalContextBlock,
     LargeKernelConv,
     BiFPN,
+    EMA,
+    EMA_Bottleneck,
+    C3_EMA,
 )
 from .conv import (
     CBAM,
@@ -292,6 +295,9 @@ __all__ = (
     "GlobalContextBlock",
     "LargeKernelConv",
     "BiFPN",
+    "EMA",
+    "EMA_Bottleneck",
+    "C3_EMA",
     "SmallObjectEnhancementHead",
     "DWDecoupledHead",
     "NoiseMapLayer",
