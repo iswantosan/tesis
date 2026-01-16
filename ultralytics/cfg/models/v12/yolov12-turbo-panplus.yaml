@@ -30,12 +30,11 @@ backbone:
 
 # YOLO12-turbo head - PAN++ REPLACES ENTIRE HEAD
 head:
-  # PAN++ takes inputs from backbone: [P5, P4, P3] = [layer 8, layer 5, layer 3]
-  # Args: [channels_list, nc, reg_max]
-  # channels_list will be auto-inferred: [1024, 512, 256] from layers [8, 5, 3]
+  # PANPlus: [from_layers], repeats, PANPlus, [nc, reg_max]
+  # Input layers: [P5, P4, P3] = [layer8, layer5, layer3]
+  # Channels auto-inferred: [1024, 512, 256] from layers [8, 5, 3]
   - [[8, 5, 3], 1, PANPlus, [80, 16]] # [P5, P4, P3], nc=80, reg_max=16
   
-  # PAN++ output format: List of 3 outputs [p3_output, p4_output, p5_output]
-  # Each output is [reg, cls] concatenated, compatible with Detect head format
-  # No Detect layer needed - PAN++ includes detection heads
-
+  # PAN++ outputs 3 tensors: [p3_out, p4_out, p5_out]
+  # Each is [reg, cls] concatenated, compatible with loss
+  # NO Detect layer needed - PAN++ includes detection heads

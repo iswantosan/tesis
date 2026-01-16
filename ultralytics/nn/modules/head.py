@@ -15,7 +15,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DecoupledP3Detect", "SmallObjectEnhancementHead", "DWDecoupledHead"
+__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect", "DecoupledP3Detect", "SmallObjectEnhancementHead", "DWDecoupledHead", "DecoupledDetect"
 
 
 class Detect(nn.Module):
@@ -918,5 +918,112 @@ class DWDecoupledHead(Detect):
         """Initialize biases untuk DWDecoupledHead."""
         m = self
         for cls_b, reg_b, s in zip(m.cls_branches, m.reg_branches, m.stride):
+            reg_b[-1].bias.data[:] = 1.0  # box
+            cls_b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls
+
+
+class DecoupledDetect(Detect):
+    """
+    Decoupled Detection Head: Separate classification and regression branches.
+    
+    Architecture:
+    - Shared stem: Conv(c_in, hid, k=1 or k=3)
+    - Regression branch: Conv(hid, hid, 3) -> Conv(hid, hid, 3) -> Conv(hid, 4*reg_max, 1)
+    - Classification branch: Conv(hid, hid, 3) -> Conv(hid, hid, 3) -> Conv(hid, nc, 1)
+    - Output: concat([reg, cls], dim=1) - same format as Detect
+    
+    Benefits:
+    - Reduces task interference between localization and classification
+    - Better for small objects (improves mAP50-95)
+    - Each branch can specialize for its task
+    
+    Args:
+        nc (int): Number of classes
+        ch (tuple): Input channels for each detection layer [P3, P4, P5]
+        reg_max (int): DFL channels (default: 16)
+        hid (int): Hidden channels for shared stem (default: 256, or min(256, ch[i]))
+    """
+    
+    def __init__(self, nc=80, ch=(), reg_max=16, hid=256):
+        """Initialize DecoupledDetect with separate cls and reg branches."""
+        # Initialize parent Detect with minimal setup
+        super().__init__(nc, ch)
+        
+        # Override reg_max if provided
+        if reg_max != 16:
+            self.reg_max = reg_max
+            self.no = nc + self.reg_max * 4
+            self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+        
+        # Clear parent's cv2 and cv3 (we'll build our own)
+        self.cv2 = nn.ModuleList()
+        self.cv3 = nn.ModuleList()
+        
+        # Build decoupled branches for each level
+        for c_in in ch:
+            # Hidden channels: min(hid, c_in) or use c_in
+            c_hid = min(hid, c_in) if hid else c_in
+            
+            # Shared stem (optional - can be removed if you want fully separate)
+            # For now, we use separate stems for reg and cls (more decoupled)
+            
+            # Regression branch (specialized for localization)
+            reg_branch = nn.Sequential(
+                Conv(c_in, c_hid, k=1, s=1, act=True),  # Stem
+                Conv(c_hid, c_hid, k=3, s=1, act=True),
+                Conv(c_hid, c_hid, k=3, s=1, act=True),
+                nn.Conv2d(c_hid, 4 * self.reg_max, 1)
+            )
+            self.cv2.append(reg_branch)
+            
+            # Classification branch (specialized for classification)
+            cls_branch = nn.Sequential(
+                Conv(c_in, c_hid, k=1, s=1, act=True),  # Stem
+                Conv(c_hid, c_hid, k=3, s=1, act=True),
+                Conv(c_hid, c_hid, k=3, s=1, act=True),
+                nn.Conv2d(c_hid, self.nc, 1)
+            )
+            self.cv3.append(cls_branch)
+    
+    def forward(self, x):
+        """
+        Forward pass through DecoupledDetect.
+        
+        Args:
+            x: List of feature tensors [P3, P4, P5]
+        
+        Returns:
+            Training: List of concatenated [reg, cls] outputs per level
+            Inference: Processed predictions (same format as Detect)
+        """
+        if self.end2end:
+            # For end2end, we need one2one branches (copy from parent logic)
+            if not hasattr(self, 'one2one_cv2'):
+                self.one2one_cv2 = copy.deepcopy(self.cv2)
+                self.one2one_cv3 = copy.deepcopy(self.cv3)
+            return self.forward_end2end(x)
+        
+        # Process each level with decoupled branches
+        outputs = []
+        for i in range(self.nl):
+            # Separate cls and reg branches
+            reg_out = self.cv2[i](x[i])  # Regression branch
+            cls_out = self.cv3[i](x[i])  # Classification branch
+            
+            # Concatenate: [reg, cls] format (same as parent Detect)
+            output = torch.cat([reg_out, cls_out], dim=1)
+            outputs.append(output)
+        
+        if self.training:
+            return outputs
+        
+        # Use parent's inference logic
+        y = self._inference(outputs)
+        return y if self.export else (y, outputs)
+    
+    def bias_init(self):
+        """Initialize biases untuk DecoupledDetect."""
+        m = self
+        for reg_b, cls_b, s in zip(m.cv2, m.cv3, m.stride):
             reg_b[-1].bias.data[:] = 1.0  # box
             cls_b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls
