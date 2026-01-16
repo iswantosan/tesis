@@ -145,7 +145,7 @@ from .conv import (
     SPDConv,
     DendriticConv2d,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, DecoupledP3Detect, DecoupledDetect, SmallObjectEnhancementHead, DWDecoupledHead
 from .noise_robust import (
     NoiseMapLayer,
     AdaptiveConv2d,
@@ -308,6 +308,8 @@ __all__ = (
     "PANPlus",
     "SmallObjectEnhancementHead",
     "DWDecoupledHead",
+    "DecoupledDetect",
+    "DecoupledP3Detect",
     "NoiseMapLayer",
     "AdaptiveConv2d",
     "AdaptiveMaxPool2d",

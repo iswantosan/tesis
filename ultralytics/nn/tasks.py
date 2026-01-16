@@ -47,6 +47,7 @@ from ultralytics.nn.modules import (
     ConvTranspose,
     Detect,
     DecoupledP3Detect,
+    DecoupledDetect,
     DWConv,
     DWConvTranspose2d,
     Focus,
@@ -1265,11 +1266,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 c2 = 4 * reg_max + num_classes
             else:
                 raise ValueError(f"PANPlus expects list of 3 layer indices in 'from', got {f}")
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, DecoupledP3Detect, SmallObjectEnhancementHead, DWDecoupledHead}:
+        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, DecoupledP3Detect, DecoupledDetect, SmallObjectEnhancementHead, DWDecoupledHead}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, Segment, Pose, OBB, SmallObjectEnhancementHead, DWDecoupledHead}:
+            if m in {Detect, Segment, Pose, OBB, SmallObjectEnhancementHead, DWDecoupledHead, DecoupledDetect}:
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
@@ -1650,7 +1651,7 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect, v10Detect, DWDecoupledHead, SmallObjectEnhancementHead)):
+            elif isinstance(m, (Detect, WorldDetect, v10Detect, DWDecoupledHead, DecoupledDetect, SmallObjectEnhancementHead)):
                 return "detect"
 
     # Guess from model filename
