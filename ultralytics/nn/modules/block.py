@@ -97,6 +97,10 @@ __all__ = (
     "C3_EMA_Enhanced",
     "CrossLevelAttention",
     "PANPlus",
+    "ECA",
+    "LightAttention",
+    "SPDDown",
+    "SPD_A_Block",
 )
 
 
@@ -6236,3 +6240,203 @@ class BiFPN(nn.Module):
         p5_bu = self.fusion_bu_p5(torch.cat([p4_bu_down, p5], dim=1))
         
         return [p3_td, p4_bu, p5_bu]
+
+
+class ECA(nn.Module):
+    """
+    Efficient Channel Attention (ECA) Module.
+    
+    Lightweight channel attention with adaptive kernel size.
+    Better than SE for small models with minimal parameters.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (for compatibility, same as c1)
+        k_size (int): Kernel size for 1D conv (auto-calculated if None)
+    """
+    
+    def __init__(self, c1, c2=None, k_size=None):
+        """Initialize ECA attention."""
+        super().__init__()
+        c2 = c2 or c1
+        
+        # Adaptive kernel size: k = |log2(C) / gamma + b / gamma|_odd
+        # Default: gamma=2, b=1
+        if k_size is None:
+            t = int(abs((torch.log2(torch.tensor(c1, dtype=torch.float32)) + 1) / 2))
+            k_size = t if t % 2 else t + 1
+            k_size = max(3, min(k_size, 9))  # Clamp to [3, 9]
+        
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """
+        Forward pass through ECA.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with channel attention
+        """
+        # Global average pooling: [B, C, H, W] -> [B, C, 1, 1]
+        y = self.avg_pool(x)
+        
+        # Squeeze: [B, C, 1, 1] -> [B, C, 1]
+        y = y.squeeze(-1)
+        
+        # 1D conv: [B, C, 1] -> [B, C, 1]
+        y = self.conv(y.transpose(-1, -2)).transpose(-1, -2)
+        
+        # Unsqueeze: [B, C, 1] -> [B, C, 1, 1]
+        y = y.unsqueeze(-1)
+        
+        # Apply attention
+        y = self.sigmoid(y)
+        
+        return x * y.expand_as(x)
+
+
+class LightAttention(nn.Module):
+    """
+    Lightweight Attention Wrapper.
+    
+    Supports SimAM (parameter-free) or ECA (minimal parameters).
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (for compatibility)
+        attn_type (str): 'simam' or 'eca' (default: 'simam')
+    """
+    
+    def __init__(self, c1, c2=None, attn_type='simam'):
+        """Initialize LightAttention."""
+        super().__init__()
+        c2 = c2 or c1
+        attn_type = attn_type.lower()
+        
+        if attn_type == 'simam':
+            self.attn = SimAM(c1, c2)
+        elif attn_type == 'eca':
+            self.attn = ECA(c1, c2)
+        else:
+            raise ValueError(f"Unknown attention type: {attn_type}. Use 'simam' or 'eca'")
+    
+    def forward(self, x):
+        """Forward pass through lightweight attention."""
+        return self.attn(x)
+
+
+class SPDDown(nn.Module):
+    """
+    SPD Downsampling Module.
+    
+    Replaces stride=2 conv with Space-to-Depth + Conv mixing.
+    Preserves spatial details better than standard downsampling.
+    
+    Architecture:
+    1. Space-to-Depth: [B, C, H, W] -> [B, C*4, H/2, W/2]
+    2. Conv mixing: [B, C*4, H/2, W/2] -> [B, C2, H/2, W/2]
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size for mixing conv (default: 3)
+        act (bool): Activation (default: True)
+    """
+    
+    def __init__(self, c1, c2, k=3, act=True):
+        """Initialize SPDDown module."""
+        super().__init__()
+        
+        # Conv mixing after space-to-depth
+        # Input: c1*4 channels (after SPD), Output: c2 channels
+        self.conv_mix = Conv(c1 * 4, c2, k=k, s=1, act=act)
+    
+    def forward(self, x):
+        """
+        Forward pass: Space-to-Depth + Conv mixing.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Downsampled features [B, C2, H/2, W/2]
+        """
+        # Space-to-Depth: Split spatial dimension into 4 parts
+        # [B, C, H, W] -> [B, C*4, H/2, W/2]
+        x = torch.cat(
+            [x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1
+        )
+        
+        # Conv mixing: [B, C*4, H/2, W/2] -> [B, C2, H/2, W/2]
+        return self.conv_mix(x)
+
+
+class SPD_A_Block(nn.Module):
+    """
+    SPD + Attention Block.
+    
+    Complete block: SPDDown -> ConvMix -> LightAttention -> MainBlock (C3/C2f/A2C2f).
+    
+    Architecture:
+    1. SPDDown: Space-to-Depth downsampling
+    2. ConvMix: Channel mixing (optional, can be 1x1 or 3x3)
+    3. LightAttention: SimAM or ECA
+    4. MainBlock: C3/C2f/A2C2f for semantic building
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        block_type (str): 'C3', 'C2f', 'A2C2f', or 'C3k2' (default: 'C3k2')
+        n (int): Number of blocks in main module (default: 1)
+        attn_type (str): 'simam' or 'eca' (default: 'simam')
+        mix_k (int): Kernel size for mixing conv (default: 3, use 1 for compression)
+        shortcut (bool): Shortcut in main block (default: True)
+    """
+    
+    def __init__(self, c1, c2, block_type='C3k2', n=1, attn_type='simam', mix_k=3, shortcut=True):
+        """Initialize SPD_A_Block."""
+        super().__init__()
+        
+        # Step 1: SPDDown
+        self.spd_down = SPDDown(c1, c2, k=mix_k, act=True)
+        
+        # Step 2: LightAttention (after conv mixing in SPDDown)
+        self.attn = LightAttention(c2, c2, attn_type=attn_type)
+        
+        # Step 3: Main block for semantic building
+        block_type = block_type.lower()
+        if block_type == 'c3':
+            self.main_block = C3(c2, c2, n, shortcut=shortcut)
+        elif block_type == 'c2f':
+            self.main_block = C2f(c2, c2, n, shortcut=shortcut)
+        elif block_type == 'a2c2f':
+            self.main_block = A2C2f(c2, c2, n, shortcut=shortcut)
+        elif block_type == 'c3k2':
+            self.main_block = C3k2(c2, c2, n, shortcut=shortcut)
+        else:
+            raise ValueError(f"Unknown block type: {block_type}. Use 'C3', 'C2f', 'A2C2f', or 'C3k2'")
+    
+    def forward(self, x):
+        """
+        Forward pass: SPD -> ConvMix -> Attention -> MainBlock.
+        
+        Args:
+            x: Input tensor [B, C1, H, W]
+        
+        Returns:
+            Processed features [B, C2, H/2, W/2]
+        """
+        # SPDDown (includes space-to-depth + conv mixing)
+        x = self.spd_down(x)
+        
+        # LightAttention
+        x = self.attn(x)
+        
+        # Main block for semantic building
+        x = self.main_block(x)
+        
+        return x

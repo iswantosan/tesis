@@ -126,6 +126,10 @@ from .block import (
     C3_EMA_Enhanced,
     CrossLevelAttention,
     PANPlus,
+    ECA,
+    LightAttention,
+    SPDDown,
+    SPD_A_Block,
 )
 from .conv import (
     CBAM,
