@@ -1590,6 +1590,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             mix_k = args[4] if len(args) > 4 else 3  # Mixing kernel size (default: 3)
             shortcut = args[5] if len(args) > 5 else True  # Shortcut (default: True)
             args = [c1, c2, block_type, n, attn_type, mix_k, shortcut]
+            # c2 is already set above, will be appended to ch list
         else:
             c2 = ch[f]
 

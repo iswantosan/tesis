@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Block modules."""
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6252,23 +6253,21 @@ class ECA(nn.Module):
     Args:
         c1 (int): Input channels
         c2 (int): Output channels (for compatibility, same as c1)
-        k_size (int): Kernel size for 1D conv (auto-calculated if None)
+        gamma (int): Gamma parameter for kernel size calculation (default: 2)
+        b (int): Bias parameter for kernel size calculation (default: 1)
     """
     
-    def __init__(self, c1, c2=None, k_size=None):
+    def __init__(self, c1, c2=None, gamma=2, b=1):
         """Initialize ECA attention."""
         super().__init__()
         c2 = c2 or c1
         
-        # Adaptive kernel size: k = |log2(C) / gamma + b / gamma|_odd
-        # Default: gamma=2, b=1
-        if k_size is None:
-            t = int(abs((torch.log2(torch.tensor(c1, dtype=torch.float32)) + 1) / 2))
-            k_size = t if t % 2 else t + 1
-            k_size = max(3, min(k_size, 9))  # Clamp to [3, 9]
+        # Adaptive kernel size: k = |log2(C) + b) / gamma|_odd
+        t = int(abs((math.log(c1, 2) + b) / gamma))
+        k = t if t % 2 else t + 1
         
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k, padding=k//2, bias=False)
         self.sigmoid = nn.Sigmoid()
         
     def forward(self, x):
@@ -6281,21 +6280,10 @@ class ECA(nn.Module):
         Returns:
             Enhanced features with channel attention
         """
-        # Global average pooling: [B, C, H, W] -> [B, C, 1, 1]
         y = self.avg_pool(x)
-        
-        # Squeeze: [B, C, 1, 1] -> [B, C, 1]
-        y = y.squeeze(-1)
-        
-        # 1D conv: [B, C, 1] -> [B, C, 1]
-        y = self.conv(y.transpose(-1, -2)).transpose(-1, -2)
-        
-        # Unsqueeze: [B, C, 1] -> [B, C, 1, 1]
-        y = y.unsqueeze(-1)
-        
-        # Apply attention
+        y = self.conv(y.squeeze(-1).transpose(-1, -2))
+        y = y.transpose(-1, -2).unsqueeze(-1)
         y = self.sigmoid(y)
-        
         return x * y.expand_as(x)
 
 
@@ -6416,7 +6404,8 @@ class SPD_A_Block(nn.Module):
         elif block_type == 'a2c2f':
             self.main_block = A2C2f(c2, c2, n, shortcut=shortcut)
         elif block_type == 'c3k2':
-            self.main_block = C3k2(c2, c2, n, shortcut=shortcut)
+            # C3k2 signature: (c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True)
+            self.main_block = C3k2(c2, c2, n, c3k=False, shortcut=shortcut)
         else:
             raise ValueError(f"Unknown block type: {block_type}. Use 'C3', 'C2f', 'A2C2f', or 'C3k2'")
     
