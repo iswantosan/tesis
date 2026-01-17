@@ -1555,6 +1555,41 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = c1  # Output channels same as input (SADHead returns features + penalty)
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m is SPDDown:
+            # SPDDown needs (c1, c2, k, act) where c1 is input and c2 is output channels
+            c1 = ch[f]  # Input channels from previous layer
+            c2 = args[0] if args else c1  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            k = args[1] if len(args) > 1 else 3  # Kernel size (default: 3)
+            act = args[2] if len(args) > 2 else True  # Activation (default: True)
+            args = [c1, c2, k, act]
+        elif m is LightAttention:
+            # LightAttention needs (c1, c2, attn_type) where c1 is input and c2 is output channels (optional)
+            c1 = ch[f]  # Input channels from previous layer
+            # If args[0] is a string, it's attn_type (format: [attn_type])
+            # Otherwise, args[0] is c2 (format: [c2, attn_type] or [c2])
+            if len(args) > 0 and isinstance(args[0], str):
+                # Format: [attn_type] - c2 defaults to c1
+                attn_type = args[0]
+                c2 = c1  # Default: same as input
+            else:
+                # Format: [c2, attn_type] or [c2]
+                c2 = args[0] if len(args) > 0 and args[0] is not None else c1
+                attn_type = args[1] if len(args) > 1 and isinstance(args[1], str) else 'simam'
+            args = [c1, c2, attn_type]
+        elif m is SPD_A_Block:
+            # SPD_A_Block needs (c1, c2, block_type, n, attn_type, mix_k, shortcut)
+            c1 = ch[f]  # Input channels from previous layer
+            c2 = args[0] if args else c1  # Output channels from args
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            block_type = args[1] if len(args) > 1 else 'C3k2'  # Block type (default: 'C3k2')
+            n = args[2] if len(args) > 2 else 1  # Number of repeats (default: 1)
+            attn_type = args[3] if len(args) > 3 else 'simam'  # Attention type (default: 'simam')
+            mix_k = args[4] if len(args) > 4 else 3  # Mixing kernel size (default: 3)
+            shortcut = args[5] if len(args) > 5 else True  # Shortcut (default: True)
+            args = [c1, c2, block_type, n, attn_type, mix_k, shortcut]
         else:
             c2 = ch[f]
 

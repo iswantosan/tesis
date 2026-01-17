@@ -25,7 +25,8 @@ backbone:
   
   # P2 formation: Replace stride=2 conv with SPD_A_Block
   # SPD_A_Block: SPDDown -> ConvMix -> LightAttention -> C3k2
-  - [-1, 1, SPD_A_Block, [64, 128, 'C3k2', 2, 'simam', 3, True]] # 1-P2/4 (SPD+Attn block)
+  # Args: [c2, block_type, n, attn_type, mix_k, shortcut] where c1 is auto from ch[f]
+  - [-1, 1, SPD_A_Block, [128, 'C3k2', 2, 'simam', 3, True]] # 1-P2/4 (SPD+Attn block)
   
   - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 2-P3/8 (standard conv for P3)
   - [-1, 2, C3k2,  [512, False, 0.25]] # 3
@@ -51,10 +52,10 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14-Upsample P3 to P2 size
   - [[-1, 1], 1, Concat, [1]] # 15-cat backbone P2 (layer 1 = P2 from SPD_A_Block)
   - [-1, 2, A2C2f, [128, False, -1]] # 16-Refine P2 (optional: add LightAttention here)
-  - [-1, 1, LightAttention, [128, 128, 'simam']] # 17-LightAttention for P2 neck path
+  - [-1, 1, LightAttention, [128, 'simam']] # 17-LightAttention for P2 neck path (c2=128, attn_type='simam')
   
   # Bottom-up path: P2 -> P3 -> P4
-  - [-1, 1, SPDDown, [128, 256, 3, True]] # 18-SPDDown preserve details (P2->P3)
+  - [-1, 1, SPDDown, [256, 3, True]] # 18-SPDDown preserve details (P2->P3) (c2=256, k=3, act=True)
   - [[-1, 13], 1, Concat, [1]] # 19-cat head P3 (layer 13 = refined P3 from top-down)
   - [-1, 2, A2C2f, [256, False, -1]] # 20-Refine P3 PAN
   
