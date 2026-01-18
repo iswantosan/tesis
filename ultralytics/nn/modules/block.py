@@ -42,6 +42,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "C3k2",
+    "C3k2Attn",
     "C2fPSA",
     "C2PSA",
     "RepVGGDW",
@@ -783,6 +784,40 @@ class C3k2(C2f):
         self.m = nn.ModuleList(
             C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
         )
+
+
+class C3k2Attn(C3k2):
+    """
+    C3k2 module with attention mechanism.
+    
+    Combines C3k2 block with lightweight attention (ECA or SimAM) for enhanced feature extraction.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of bottleneck blocks (default: 1)
+        c3k (bool): Whether to use C3k blocks instead of Bottleneck (default: False)
+        e (float): Expansion ratio (default: 0.5)
+        g (int): Groups for convolution (default: 1)
+        shortcut (bool): Use shortcut connection (default: True)
+        attn_type (str): Attention type - 'eca' or 'simam' (default: 'eca')
+    """
+    
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, attn_type='eca'):
+        """Initialize C3k2Attn with attention mechanism."""
+        super().__init__(c1, c2, n, c3k, e, g, shortcut)
+        # Add attention module after C3k2 processing
+        self.attn = LightAttention(c2, c2, attn_type=attn_type)
+    
+    def forward(self, x):
+        """Forward pass through C3k2 with attention."""
+        # First pass through C3k2
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        out = self.cv2(torch.cat(y, 1))
+        # Apply attention
+        out = self.attn(out)
+        return out
 
 
 class C3k(C3):

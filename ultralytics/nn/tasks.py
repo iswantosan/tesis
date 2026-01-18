@@ -37,6 +37,7 @@ from ultralytics.nn.modules import (
     ChannelAttention,
     SpatialAttention,
     C3k2,
+    C3k2Attn,
     C3x,
     CBFuse,
     CBLinear,
@@ -1084,6 +1085,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2,
             C2f,
             C3k2,
+            C3k2Attn,
             RepNCSPELAN4,
             ELAN1,
             ADown,
@@ -1146,6 +1148,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2,
                 C2f,
                 C3k2,
+                C3k2Attn,
                 C3_EMA,
                 C2fAttn,
                 C3,
@@ -1164,6 +1167,22 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
+            if m is C3k2Attn:  # C3k2Attn with attention type
+                legacy = False
+                # Handle attn_type parameter: if last arg is string, it's attn_type
+                # Format: [c2, shortcut, attn_type] or [c2, shortcut] (default: 'eca')
+                # After insert(2, n), args = [c1, c2, n, shortcut, ...]
+                # Check if last arg is string (attn_type)
+                if len(args) > 4 and isinstance(args[-1], str):
+                    attn_type = args[-1]
+                    args = args[:-1] + [attn_type]  # Remove string from middle, add at end
+                elif len(args) == 4 and isinstance(args[-1], str):
+                    # Format: [c2, shortcut, attn_type] -> after insert: [c1, c2, n, shortcut, attn_type]
+                    attn_type = args[-1]
+                    args = args[:-1] + [attn_type]  # Move attn_type to end
+                else:
+                    # Default attn_type is 'eca' if not provided
+                    args.append('eca')
             if m is A2C2f: 
                 legacy = False
                 if scale in "lx":  # for L/X sizes
