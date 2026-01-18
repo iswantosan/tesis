@@ -6605,3 +6605,407 @@ class ASSN(nn.Module):
             p3b = p3b_refined
         
         return p3b
+
+
+# ==================== ECAP-YOLOv5 Blocks ====================
+
+class ECABottleneck(nn.Module):
+    """
+    ECA Bottleneck Block.
+    
+    Residual bottleneck with ECA attention.
+    Structure: CBS → ECA → CBS + skip connection
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        shortcut (bool): Use shortcut connection (default: True)
+    """
+    
+    def __init__(self, c1, c2, shortcut=True):
+        """Initialize ECABottleneck."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c2 // 2  # Hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)  # 1x1 conv
+        self.eca = ECA(c_, c_)  # ECA attention
+        self.cv2 = Conv(c_, c2, 3, 1)  # 3x3 conv
+        self.add = shortcut and c1 == c2
+        
+    def forward(self, x):
+        """Forward pass through ECABottleneck."""
+        return x + self.cv2(self.eca(self.cv1(x))) if self.add else self.cv2(self.eca(self.cv1(x)))
+
+
+class EAC31(nn.Module):
+    """
+    EAC31 Block: ECA before sum in bottleneck.
+    
+    Structure: CBS → (CBS → ECA → CBS) + skip → CBS
+    EAC31_n: n*ECABottleneck in lower branch
+    EAC31_nF: No bottleneck, just CBS branches
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of ECABottleneck repeats (default: 1)
+        use_bottleneck (bool): Use bottleneck structure (default: True)
+    """
+    
+    def __init__(self, c1, c2, n=1, use_bottleneck=True):
+        """Initialize EAC31."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)  # Initial CBS
+        
+        if use_bottleneck:
+            # Lower branch: n*ECABottleneck
+            self.m = nn.Sequential(*(ECABottleneck(c_, c_, True) for _ in range(n)))
+        else:
+            # EAC31_nF: No bottleneck, just CBS
+            self.m = Conv(c_, c_, 3, 1)
+        
+        # Upper branch: CBS
+        self.cv2 = Conv(c_, c_, 1, 1)
+        
+        # Final CBS
+        self.cv3 = Conv(c_ * 2, c2, 1, 1)
+        
+    def forward(self, x):
+        """Forward pass through EAC31."""
+        y1 = self.cv1(x)
+        return self.cv3(torch.cat([self.m(y1), self.cv2(y1)], 1))
+
+
+class EAC32(nn.Module):
+    """
+    EAC32 Block: ECA after C3 module.
+    
+    Structure: CBS → (CBS branches) → Concat → CBS → ECA
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of ECABottleneck repeats (default: 1)
+        use_bottleneck (bool): Use bottleneck structure (default: True)
+    """
+    
+    def __init__(self, c1, c2, n=1, use_bottleneck=True):
+        """Initialize EAC32."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        
+        if use_bottleneck:
+            # Lower branch: n*ECABottleneck
+            self.m = nn.Sequential(*(ECABottleneck(c_, c_, True) for _ in range(n)))
+        else:
+            # EAC32_nF: Upper branch with CBS → CBS → CBS → ECA, lower branch with CBS
+            self.cv_upper1 = Conv(c_, c_, 1, 1)
+            self.cv_upper2 = Conv(c_, c_, 3, 1)
+            self.cv_upper3 = Conv(c_, c_, 3, 1)
+            self.eca_upper = ECA(c_, c_)
+            self.m = None
+        
+        self.cv2 = Conv(c_, c_, 1, 1)  # Lower branch for bottleneck version
+        
+        # Final CBS and ECA
+        self.cv3 = Conv(c_ * 2, c2, 1, 1)
+        self.eca = ECA(c2, c2)
+        
+    def forward(self, x):
+        """Forward pass through EAC32."""
+        y1 = self.cv1(x)
+        
+        if self.m is not None:
+            # Bottleneck version
+            y = torch.cat([self.m(y1), self.cv2(y1)], 1)
+        else:
+            # EAC32_nF version
+            y_upper = self.eca_upper(self.cv_upper3(self.cv_upper2(self.cv_upper1(y1))))
+            y_lower = self.cv2(y1)
+            y = torch.cat([y_upper, y_lower], 1)
+        
+        y = self.cv3(y)
+        return self.eca(y)
+
+
+class EAC33(nn.Module):
+    """
+    EAC33 Block: ECA in part of C3 without bottleneck.
+    
+    Structure: CBS → (CBS → ECA → CBS) + CBS → Concat → CBS
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of repeats (default: 1)
+    """
+    
+    def __init__(self, c1, c2, n=1):
+        """Initialize EAC33."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        
+        # Upper branch: CBS → ECA → CBS
+        self.cv_upper1 = Conv(c_, c_, 1, 1)
+        self.eca = ECA(c_, c_)
+        self.cv_upper2 = Conv(c_, c_, 3, 1)
+        
+        # Lower branch: CBS
+        self.cv2 = Conv(c_, c_, 1, 1)
+        
+        # Final CBS
+        self.cv3 = Conv(c_ * 2, c2, 1, 1)
+        
+    def forward(self, x):
+        """Forward pass through EAC33."""
+        y1 = self.cv1(x)
+        y_upper = self.cv_upper2(self.eca(self.cv_upper1(y1)))
+        y_lower = self.cv2(y1)
+        return self.cv3(torch.cat([y_upper, y_lower], 1))
+
+
+class EAC34(nn.Module):
+    """
+    EAC34 Block: ECA between conv modules in bottleneck.
+    
+    Structure: CBS → (CBS → ECA → CBS) + skip → CBS
+    EAC34_n: n*ECABottleneck in upper branch
+    EAC34_F: CBS → CBS → ECA → CBS in upper branch
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of ECABottleneck repeats (default: 1)
+        use_bottleneck (bool): Use bottleneck structure (default: True)
+    """
+    
+    def __init__(self, c1, c2, n=1, use_bottleneck=True):
+        """Initialize EAC34."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        
+        if use_bottleneck:
+            # Upper branch: n*ECABottleneck
+            self.m = nn.Sequential(*(ECABottleneck(c_, c_, True) for _ in range(n)))
+        else:
+            # EAC34_F: CBS → CBS → ECA → CBS
+            self.cv_upper1 = Conv(c_, c_, 1, 1)
+            self.cv_upper2 = Conv(c_, c_, 3, 1)
+            self.eca_upper = ECA(c_, c_)
+            self.cv_upper3 = Conv(c_, c_, 3, 1)
+            self.m = None
+        
+        # Lower branch: CBS
+        self.cv2 = Conv(c_, c_, 1, 1)
+        
+        # Final CBS
+        self.cv3 = Conv(c_ * 2, c2, 1, 1)
+        
+    def forward(self, x):
+        """Forward pass through EAC34."""
+        y1 = self.cv1(x)
+        
+        if self.m is not None:
+            # Bottleneck version
+            y_upper = self.m(y1)
+        else:
+            # EAC34_F version
+            y_upper = self.cv_upper3(self.eca_upper(self.cv_upper2(self.cv_upper1(y1))))
+        
+        y_lower = self.cv2(y1)
+        return self.cv3(torch.cat([y_upper, y_lower], 1))
+
+
+class MEAC(nn.Module):
+    """
+    Multi-scale Enhanced Attention Convolution (MEAC).
+    
+    Uses Global Max Pooling (GMP) instead of GAP in channel attention.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        reduction (int): Reduction ratio (default: 16)
+    """
+    
+    def __init__(self, c1, c2=None, reduction=16):
+        """Initialize MEAC."""
+        super().__init__()
+        c2 = c2 or c1
+        
+        c_mid = max(8, c1 // reduction)
+        
+        # Global Max Pooling
+        self.gmp = nn.AdaptiveMaxPool2d(1)
+        
+        # Two FC layers (implemented as 1x1 conv)
+        self.fc1 = nn.Conv2d(c1, c_mid, 1, bias=False)
+        self.fc2 = nn.Conv2d(c_mid, c2, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """Forward pass through MEAC."""
+        y = self.gmp(x)  # [B, C, 1, 1]
+        y = self.fc1(y)  # [B, C_mid, 1, 1]
+        y = self.fc2(y)  # [B, C, 1, 1]
+        y = self.sigmoid(y)  # [B, C, 1, 1]
+        return x * y.expand_as(x)
+
+
+class AEAC(nn.Module):
+    """
+    Atrous Efficient Attention Convolution (AEAC).
+    
+    Uses atrous convolution in channel attention with different strides.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        kernel_size (int): Kernel size for 1D conv (default: 3)
+        stride (int): Stride for 1D conv (default: 1)
+    """
+    
+    def __init__(self, c1, c2=None, kernel_size=3, stride=1):
+        """Initialize AEAC."""
+        super().__init__()
+        c2 = c2 or c1
+        
+        # Global Average Pooling
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        
+        # 1D convolution with atrous (dilated)
+        padding = (kernel_size - 1) // 2
+        self.conv1d = nn.Conv1d(1, 1, kernel_size=kernel_size, stride=stride, 
+                               padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """Forward pass through AEAC."""
+        y = self.gap(x)  # [B, C, 1, 1]
+        y = y.squeeze(-1).transpose(-1, -2)  # [B, 1, C]
+        y = self.conv1d(y)  # [B, 1, C]
+        y = y.transpose(-1, -2).unsqueeze(-1)  # [B, C, 1, 1]
+        y = self.sigmoid(y)
+        return x * y.expand_as(x)
+
+
+class EAP(nn.Module):
+    """
+    Efficient Channel Attention Pyramid (EAP).
+    
+    Multi-scale pyramid using ECA with different kernel sizes.
+    Uses ECA instead of max pooling in SPP.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        kernel_sizes (list): List of kernel sizes for ECA (default: [5, 9, 13])
+    """
+    
+    def __init__(self, c1, c2, kernel_sizes=[5, 9, 13]):
+        """Initialize EAP."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c1 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        
+        # Three parallel ECA branches with different kernel sizes
+        self.eca_branches = nn.ModuleList()
+        for k in kernel_sizes:
+            # Create ECA with specific kernel size
+            eca = ECA(c_, c_)
+            self.eca_branches.append(eca)
+        
+        # Final CBS
+        self.cv2 = Conv(c_ * len(kernel_sizes), c2, 1, 1)
+        
+    def forward(self, x):
+        """Forward pass through EAP."""
+        y = self.cv1(x)
+        # Apply ECA branches (note: ECA uses adaptive kernel, but we use different instances)
+        y_branches = [eca(y) for eca in self.eca_branches]
+        return self.cv2(torch.cat(y_branches, 1))
+
+
+class MEAP(nn.Module):
+    """
+    Max Pooling Efficient Channel Attention Pyramid (MEAP).
+    
+    Uses MEAC (with GMP) instead of ECA in pyramid structure.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        kernel_sizes (list): List of kernel sizes (for reference, MEAC uses GMP) (default: [5, 9, 13])
+    """
+    
+    def __init__(self, c1, c2, kernel_sizes=[5, 9, 13]):
+        """Initialize MEAP."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c1 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        
+        # Three parallel MEAC branches
+        self.meac_branches = nn.ModuleList([MEAC(c_, c_) for _ in kernel_sizes])
+        
+        # Final CBS
+        self.cv2 = Conv(c_ * len(kernel_sizes), c2, 1, 1)
+        
+    def forward(self, x):
+        """Forward pass through MEAP."""
+        y = self.cv1(x)
+        y_branches = [meac(y) for meac in self.meac_branches]
+        return self.cv2(torch.cat(y_branches, 1))
+
+
+class AEAP(nn.Module):
+    """
+    Atrous Efficient Channel Attention Pyramid (AEAP).
+    
+    Uses AEAC with different strides to create pyramid structure.
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        kernel_sizes (list): List of kernel sizes (default: [5, 9, 13])
+        strides (list): List of strides for atrous conv (default: [1, 2, 3])
+    """
+    
+    def __init__(self, c1, c2, kernel_sizes=[5, 9, 13], strides=[1, 2, 3]):
+        """Initialize AEAP."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = c1 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)
+        
+        # Three parallel AEAC branches with different strides
+        self.aeac_branches = nn.ModuleList()
+        for k, s in zip(kernel_sizes, strides):
+            aeac = AEAC(c_, c_, kernel_size=k, stride=s)
+            self.aeac_branches.append(aeac)
+        
+        # Final CBS
+        self.cv2 = Conv(c_ * len(kernel_sizes), c2, 1, 1)
+        
+    def forward(self, x):
+        """Forward pass through AEAP."""
+        y = self.cv1(x)
+        y_branches = [aeac(y) for aeac in self.aeac_branches]
+        return self.cv2(torch.cat(y_branches, 1))

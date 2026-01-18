@@ -148,6 +148,16 @@ from ultralytics.nn.modules import (
     SPD_A_Block,
     E_ELAN,
     ASSN,
+    ECABottleneck,
+    EAC31,
+    EAC32,
+    EAC33,
+    EAC34,
+    MEAC,
+    AEAC,
+    EAP,
+    MEAP,
+    AEAP,
     SmallObjectEnhancementHead,
     DWDecoupledHead,
 )
@@ -1596,6 +1606,27 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = c1  # Output channels same as input (SADHead returns features + penalty)
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m in {EAC31, EAC32, EAC33, EAC34}:
+            # EAC3 blocks need (c1, c2, n, use_bottleneck)
+            c1 = ch[f] if isinstance(f, int) else ch[f[0]]
+            c2 = args[0] if args else c1
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            n = args[1] if len(args) > 1 else 1  # Number of repeats (default: 1)
+            use_bottleneck = args[2] if len(args) > 2 else True  # Use bottleneck (default: True)
+            args = [c1, c2, n, use_bottleneck]
+        elif m in {EAP, MEAP, AEAP}:
+            # Pyramid blocks need (c1, c2, kernel_sizes)
+            c1 = ch[f] if isinstance(f, int) else ch[f[0]]
+            c2 = args[0] if args else c1
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            kernel_sizes = args[1] if len(args) > 1 else [5, 9, 13]  # Default kernel sizes
+            if m is AEAP:
+                strides = args[2] if len(args) > 2 else [1, 2, 3]  # Strides for AEAP
+                args = [c1, c2, kernel_sizes, strides]
+            else:
+                args = [c1, c2, kernel_sizes]
         elif m is SPDDown:
             # SPDDown needs (c1, c2, k, act) where c1 is input and c2 is output channels
             c1 = ch[f]  # Input channels from previous layer
