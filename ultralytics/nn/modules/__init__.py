@@ -130,6 +130,8 @@ from .block import (
     LightAttention,
     SPDDown,
     SPD_A_Block,
+    E_ELAN,
+    ASSN,
 )
 from .conv import (
     CBAM,
@@ -318,4 +320,6 @@ __all__ = (
     "AdaptiveConv2d",
     "AdaptiveMaxPool2d",
     "AdaptiveAvgPool2d",
+    "E_ELAN",
+    "ASSN",
 )

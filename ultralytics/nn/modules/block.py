@@ -6429,3 +6429,179 @@ class SPD_A_Block(nn.Module):
         x = self.main_block(x)
         
         return x
+
+
+class E_ELAN(nn.Module):
+    """
+    Enhanced ELAN (E-ELAN) for Scale Sequence Refinement.
+    
+    Architecture with multiple branches and skip connections:
+    - Main path: 1x1 Conv2D → 3x3 Conv2D → 3x3 Conv2D
+    - Branch path: 1x1 Conv2D → 3x3 Conv2D
+    - Multiple skip connections for gradient flow
+    - Final concatenation and 1x1 Conv2D output
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        e (float): Expansion ratio (default: 0.5)
+    """
+    
+    def __init__(self, c1, c2, e=0.5):
+        """Initialize E-ELAN for scale sequence refinement."""
+        super().__init__()
+        from .conv import Conv
+        
+        c_ = int(c1 * e)  # Hidden channels
+        
+        # Main path: 1x1 Conv2D → 3x3 Conv2D → 3x3 Conv2D
+        self.cv1_main = Conv(c1, c_, k=1, s=1, act=True)
+        self.cv2_main = Conv(c_, c_, k=3, s=1, act=True)
+        self.cv3_main = Conv(c_, c_, k=3, s=1, act=True)
+        
+        # Branch path: 1x1 Conv2D → 3x3 Conv2D
+        self.cv1_branch = Conv(c1, c_, k=1, s=1, act=True)
+        self.cv2_branch = Conv(c_, c_, k=3, s=1, act=True)
+        
+        # Final output: 1x1 Conv2D
+        # Concatenation: cv1_main + cv2_main + cv3_main + cv2_branch = 4 * c_
+        self.cv_out = Conv(4 * c_, c2, k=1, s=1, act=True)
+        
+    def forward(self, x):
+        """
+        Forward pass through E-ELAN.
+        
+        Process:
+        1. Main path: cv1_main → cv2_main (with skip from cv1_main) → cv3_main
+        2. Branch path: cv1_branch → cv2_branch (with skip from cv1_branch and cv2_main)
+        3. Concatenate all outputs
+        4. Final 1x1 Conv2D
+        """
+        # Main path
+        x1 = self.cv1_main(x)  # [B, c_, H, W]
+        x2 = self.cv2_main(x1)  # [B, c_, H, W] (skip connection from x1)
+        x2 = x2 + x1  # Skip connection: cv1_main → cv2_main
+        x3 = self.cv3_main(x2)  # [B, c_, H, W]
+        
+        # Branch path
+        x4 = self.cv1_branch(x)  # [B, c_, H, W]
+        x5 = self.cv2_branch(x4)  # [B, c_, H, W] (skip connection from x4)
+        x5 = x5 + x4  # Skip connection: cv1_branch → cv2_branch
+        x5 = x5 + x2  # Skip connection: cv2_main → cv2_branch
+        
+        # Concatenate all outputs: [x1, x2, x3, x5]
+        x_cat = torch.cat([x1, x2, x3, x5], dim=1)  # [B, 4*c_, H, W]
+        
+        # Final output
+        x_out = self.cv_out(x_cat)  # [B, c2, H, W]
+        
+        return x_out
+
+
+class ASSN(nn.Module):
+    """
+    Attention-based Scale Sequence Network (ASSN).
+    
+    Architecture:
+    - P5: 1x1 Conv2D → Upscaling
+    - P4: 1x1 Conv2D → Upscaling
+    - P3A: Channel Attention → Spatial Attention
+    - P3 Attention Mapping: Broadcast and multiply with P5 and P4
+    - Concatenate weighted features to form Scale Sequence
+    - E-ELAN for Scale Sequence Refinement
+    - Element-wise summation with original P3B
+    
+    Args:
+        c_p5 (int): P5 channels
+        c_p4 (int): P4 channels
+        c_p3 (int): P3 channels
+        c_out (int): Output channels (default: same as P3)
+    """
+    
+    def __init__(self, c_p5, c_p4, c_p3, c_out=None):
+        """Initialize ASSN for attention-based scale sequence fusion."""
+        super().__init__()
+        from .conv import Conv, ChannelAttention, SpatialAttention
+        
+        if c_out is None:
+            c_out = c_p3
+        
+        self.c_out = c_out  # Store for use in forward
+        
+        # Align all channels to P3 channels for fusion
+        c_align = c_p3
+        
+        # P5 processing: 1x1 Conv2D → Upscaling (2x for P5→P4, then handled in forward)
+        self.p5_conv = Conv(c_p5, c_align, k=1, s=1, act=True)
+        self.p5_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        
+        # P4 processing: 1x1 Conv2D → Upscaling (2x for P4→P3)
+        self.p4_conv = Conv(c_p4, c_align, k=1, s=1, act=True)
+        self.p4_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        
+        # P3A processing: Channel Attention → Spatial Attention
+        self.p3_channel_attn = ChannelAttention(c_p3)
+        self.p3_spatial_attn = SpatialAttention(kernel_size=7)
+        
+        # E-ELAN for Scale Sequence Refinement
+        # After concat: 3 * c_align channels (P5, P4, P3A all weighted)
+        self.e_elan = E_ELAN(3 * c_align, c_out, e=0.5)
+        
+    def forward(self, x):
+        """
+        Forward pass through ASSN.
+        
+        Args:
+            x: List of 3 tensors [P5, P4, P3A]
+               P5: [B, c_p5, H5, W5]
+               P4: [B, c_p4, H4, W4]
+               P3A: [B, c_p3, H3, W3]
+        
+        Returns:
+            Enhanced P3B features: [B, c_out, H3, W3]
+        """
+        if isinstance(x, (list, tuple)) and len(x) == 3:
+            p5, p4, p3a = x
+        else:
+            raise ValueError(f"ASSN expects list of 3 tensors [P5, P4, P3A], got {type(x)}")
+        
+        # Process P5: 1x1 Conv2D → Upscaling (may need 2x upscale if coming from P5)
+        p5_processed = self.p5_conv(p5)
+        p5_up = self.p5_upsample(p5_processed)  # First 2x upscale
+        
+        # Process P4: 1x1 Conv2D → Upscaling (2x upscale)
+        p4_processed = self.p4_conv(p4)
+        p4_up = self.p4_upsample(p4_processed)  # 2x upscale
+        
+        # Process P3A: Channel Attention → Spatial Attention
+        p3a_ca = self.p3_channel_attn(p3a)
+        p3a_attn = self.p3_spatial_attn(p3a_ca)  # [B, c_p3, H3, W3]
+        
+        # Ensure spatial dimensions match P3A (adaptive upscaling)
+        _, _, h3, w3 = p3a_attn.shape
+        if p5_up.shape[2:] != (h3, w3):
+            # P5 might need additional upscaling (if it was at P5 size, need 4x total)
+            p5_up = F.interpolate(p5_up, size=(h3, w3), mode='bilinear', align_corners=False)
+        if p4_up.shape[2:] != (h3, w3):
+            # P4 should match, but handle edge cases
+            p4_up = F.interpolate(p4_up, size=(h3, w3), mode='bilinear', align_corners=False)
+        
+        # P3 Attention Mapping: Broadcast and multiply with P5 and P4
+        p5_weighted = p5_up * p3a_attn  # Element-wise multiplication
+        p4_weighted = p4_up * p3a_attn  # Element-wise multiplication
+        p3a_weighted = p3a_attn * p3a_attn  # Self-attention (or just use p3a_attn)
+        
+        # Concatenate weighted features to form Scale Sequence
+        scale_sequence = torch.cat([p5_weighted, p4_weighted, p3a_weighted], dim=1)  # [B, 3*c_align, H3, W3]
+        
+        # E-ELAN for Scale Sequence Refinement
+        p3b_refined = self.e_elan(scale_sequence)  # [B, c_out, H3, W3]
+        
+        # Element-wise summation with original P3A (if channels match)
+        if p3a.shape[1] == self.c_out:
+            p3b = p3b_refined + p3a
+        else:
+            # If channels don't match, just return refined features
+            p3b = p3b_refined
+        
+        return p3b
