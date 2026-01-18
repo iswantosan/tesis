@@ -282,3 +282,4 @@
 **Dokumentasi ini dibuat berdasarkan hasil testing 100 epochs pada YOLOv12**
 
 
+

@@ -23,6 +23,7 @@ __all__ = (
     "RepConv",
     "Index",
     "SPDConv",
+    "SPDConv_CA",
     "SmallObjectBlock",
     "DendriticConv2d"
 )
@@ -395,6 +396,62 @@ class SPDConv(nn.Module):
         )
         # Apply convolution (stride=1, spatial size already reduced by split)
         return self.conv(x)
+
+
+class SPDConv_CA(nn.Module):
+    """
+    Spatial-to-Depth Convolution with Channel Attention (SPDConv_CA).
+    
+    Combines SPDConv downsampling with Channel Attention for better feature selection.
+    Preserves spatial information during downsampling while emphasizing important channels.
+    Better for small object detection compared to standard Conv downsampling.
+    
+    Architecture:
+    - SPDConv: Split spatial -> concatenate to channels -> conv
+    - Channel Attention: Adaptive pooling -> FC -> Sigmoid -> Multiply
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride (default: 2, must be 2 for proper downsampling)
+        p (int): Padding (auto-calculated if None)
+        g (int): Groups (default: 1)
+        act (bool): Activation (default: True)
+    """
+    
+    def __init__(self, c1, c2, k=3, s=2, p=None, g=1, act=True):
+        """Initialize SPDConv_CA module."""
+        super().__init__()
+        if s != 2:
+            raise ValueError(f"SPDConv_CA stride must be 2, got {s}")
+        
+        # SPDConv: Split spatial -> concatenate to channels -> conv
+        # Input: [B, C, H, W] -> Split into 4 parts -> [B, C*4, H/2, W/2] -> Conv to c2
+        self.conv = Conv(c1 * 4, c2, k, 1, autopad(k, p), g, act=act)
+        
+        # Channel Attention after convolution
+        self.ca = ChannelAttention(c2)
+        
+        self.s = s
+    
+    def forward(self, x):
+        """
+        Forward pass: SPDConv + Channel Attention.
+        
+        Input: [B, C, H, W]
+        Output: [B, C2, H/2, W/2]
+        """
+        # Split spatial dimension into 4 parts (for stride=2 downsampling)
+        # Equivalent to: top-left, top-right, bottom-left, bottom-right
+        x = torch.cat(
+            [x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1
+        )
+        # Apply convolution (stride=1, spatial size already reduced by split)
+        x = self.conv(x)
+        # Apply channel attention
+        x = self.ca(x)
+        return x
 
 
 class DendriticConv2d(nn.Module):
