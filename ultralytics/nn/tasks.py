@@ -1615,6 +1615,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             n = args[1] if len(args) > 1 else 1  # Number of repeats (default: 1)
             use_bottleneck = args[2] if len(args) > 2 else True  # Use bottleneck (default: True)
             args = [c1, c2, n, use_bottleneck]
+            # c2 is already set above, will be appended to ch list
         elif m in {EAP, MEAP, AEAP}:
             # Pyramid blocks need (c1, c2, kernel_sizes)
             c1 = ch[f] if isinstance(f, int) else ch[f[0]]
@@ -1627,6 +1628,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c1, c2, kernel_sizes, strides]
             else:
                 args = [c1, c2, kernel_sizes]
+            # c2 is already set above, will be appended to ch list
         elif m is SPDDown:
             # SPDDown needs (c1, c2, k, act) where c1 is input and c2 is output channels
             c1 = ch[f]  # Input channels from previous layer
