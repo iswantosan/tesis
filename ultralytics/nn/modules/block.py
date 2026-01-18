@@ -281,6 +281,9 @@ class C2f(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         """Initializes a CSP bottleneck with 2 convolutions and n Bottleneck blocks for faster processing."""
         super().__init__()
+        # Hardcode e to 0.5 if invalid (e.g., string like 'eca' was passed)
+        if not isinstance(e, (int, float)):
+            e = 0.5  # Default expansion ratio
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
@@ -306,6 +309,9 @@ class C3(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         """Initialize the CSP Bottleneck with given channels, number, shortcut, groups, and expansion values."""
         super().__init__()
+        # Hardcode e to 0.5 if invalid (e.g., string like 'eca' was passed)
+        if not isinstance(e, (int, float)):
+            e = 0.5  # Default expansion ratio
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c1, c_, 1, 1)
@@ -503,6 +509,9 @@ class C2fAttn(nn.Module):
     def __init__(self, c1, c2, n=1, ec=128, nh=1, gc=512, shortcut=False, g=1, e=0.5):
         """Initializes C2f module with attention mechanism for enhanced feature extraction and processing."""
         super().__init__()
+        # Hardcode e to 0.5 if invalid (e.g., string like 'eca' was passed)
+        if not isinstance(e, (int, float)):
+            e = 0.5  # Default expansion ratio
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((3 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
@@ -806,8 +815,8 @@ class C3k2Attn(C3k2):
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, attn_type='eca'):
         """Initialize C3k2Attn with attention mechanism."""
         super().__init__(c1, c2, n, c3k, e, g, shortcut)
-        # Add attention module after C3k2 processing
-        self.attn = LightAttention(c2, c2, attn_type=attn_type)
+        # Hardcode ECA attention
+        self.attn = LightAttention(c2, c2, attn_type='eca')
     
     def forward(self, x):
         """Forward pass through C3k2 with attention."""
@@ -1737,6 +1746,9 @@ class A2C2f(nn.Module):
 
     def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=2.0, e=0.5, g=1, shortcut=True):
         super().__init__()
+        # Hardcode e to 0.5 if invalid (e.g., string like 'eca' was passed)
+        if not isinstance(e, (int, float)):
+            e = 0.5  # Default expansion ratio
         c_ = int(c2 * e)  # hidden channels
         assert c_ % 32 == 0, "Dimension of ABlock be a multiple of 32."
 
@@ -6338,14 +6350,8 @@ class LightAttention(nn.Module):
         """Initialize LightAttention."""
         super().__init__()
         c2 = c2 or c1
-        attn_type = attn_type.lower()
-        
-        if attn_type == 'simam':
-            self.attn = SimAM(c1, c2)
-        elif attn_type == 'eca':
-            self.attn = ECA(c1, c2)
-        else:
-            raise ValueError(f"Unknown attention type: {attn_type}. Use 'simam' or 'eca'")
+        # Hardcode ECA attention
+        self.attn = ECA(c1, c2)
     
     def forward(self, x):
         """Forward pass through lightweight attention."""
@@ -6427,8 +6433,8 @@ class SPD_A_Block(nn.Module):
         # Step 1: SPDDown
         self.spd_down = SPDDown(c1, c2, k=mix_k, act=True)
         
-        # Step 2: LightAttention (after conv mixing in SPDDown)
-        self.attn = LightAttention(c2, c2, attn_type=attn_type)
+        # Step 2: LightAttention (hardcode ECA)
+        self.attn = LightAttention(c2, c2, attn_type='eca')
         
         # Step 3: Main block for semantic building
         block_type = block_type.lower()

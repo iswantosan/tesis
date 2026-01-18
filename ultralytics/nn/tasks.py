@@ -1167,22 +1167,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
-            if m is C3k2Attn:  # C3k2Attn with attention type
+            if m is C3k2Attn:  # C3k2Attn - hardcode ECA, ignore attn_type parameter
                 legacy = False
-                # Handle attn_type parameter: if last arg is string, it's attn_type
-                # Format: [c2, shortcut, attn_type] or [c2, shortcut] (default: 'eca')
-                # After insert(2, n), args = [c1, c2, n, shortcut, ...]
-                # Check if last arg is string (attn_type)
-                if len(args) > 4 and isinstance(args[-1], str):
-                    attn_type = args[-1]
-                    args = args[:-1] + [attn_type]  # Remove string from middle, add at end
-                elif len(args) == 4 and isinstance(args[-1], str):
-                    # Format: [c2, shortcut, attn_type] -> after insert: [c1, c2, n, shortcut, attn_type]
-                    attn_type = args[-1]
-                    args = args[:-1] + [attn_type]  # Move attn_type to end
-                else:
-                    # Default attn_type is 'eca' if not provided
-                    args.append('eca')
+                # Remove any string attn_type parameter (hardcoded to 'eca' in class)
+                if len(args) > 0 and isinstance(args[-1], str):
+                    args = args[:-1]  # Remove string attn_type
+                # Always append 'eca' (hardcoded, but kept for signature compatibility)
+                args.append('eca')
             if m is A2C2f: 
                 legacy = False
                 if scale in "lx":  # for L/X sizes
@@ -1658,31 +1649,31 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             act = args[2] if len(args) > 2 else True  # Activation (default: True)
             args = [c1, c2, k, act]
         elif m is LightAttention:
-            # LightAttention needs (c1, c2, attn_type) where c1 is input and c2 is output channels (optional)
+            # LightAttention needs (c1, c2, attn_type) - hardcode attn_type to 'eca'
             c1 = ch[f]  # Input channels from previous layer
-            # If args[0] is a string, it's attn_type (format: [attn_type])
-            # Otherwise, args[0] is c2 (format: [c2, attn_type] or [c2])
+            # If args[0] is a string, ignore it (was attn_type)
+            # Otherwise, args[0] is c2 (format: [c2] or [c2, attn_type])
             if len(args) > 0 and isinstance(args[0], str):
-                # Format: [attn_type] - c2 defaults to c1
-                attn_type = args[0]
+                # Format: [attn_type] - c2 defaults to c1, ignore attn_type (hardcoded to 'eca')
                 c2 = c1  # Default: same as input
             else:
-                # Format: [c2, attn_type] or [c2]
+                # Format: [c2] or [c2, attn_type] - ignore attn_type if present
                 c2 = args[0] if len(args) > 0 and args[0] is not None else c1
-                attn_type = args[1] if len(args) > 1 and isinstance(args[1], str) else 'simam'
-            args = [c1, c2, attn_type]
+            # Hardcode attn_type to 'eca'
+            args = [c1, c2, 'eca']
         elif m is SPD_A_Block:
-            # SPD_A_Block needs (c1, c2, block_type, n, attn_type, mix_k, shortcut)
+            # SPD_A_Block needs (c1, c2, block_type, n, attn_type, mix_k, shortcut) - hardcode attn_type to 'eca'
             c1 = ch[f]  # Input channels from previous layer
             c2 = args[0] if args else c1  # Output channels from args
             if c2 != nc:
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             block_type = args[1] if len(args) > 1 else 'C3k2'  # Block type (default: 'C3k2')
             n = args[2] if len(args) > 2 else 1  # Number of repeats (default: 1)
-            attn_type = args[3] if len(args) > 3 else 'simam'  # Attention type (default: 'simam')
-            mix_k = args[4] if len(args) > 4 else 3  # Mixing kernel size (default: 3)
-            shortcut = args[5] if len(args) > 5 else True  # Shortcut (default: True)
-            args = [c1, c2, block_type, n, attn_type, mix_k, shortcut]
+            # Skip attn_type in args if present, hardcode to 'eca'
+            mix_k = args[4] if len(args) > 4 and not isinstance(args[3], str) else (args[3] if len(args) > 3 and not isinstance(args[3], str) else 3)
+            shortcut = args[5] if len(args) > 5 and not isinstance(args[4], str) else (args[4] if len(args) > 4 and not isinstance(args[4], str) else True)
+            # Hardcode attn_type to 'eca'
+            args = [c1, c2, block_type, n, 'eca', mix_k, shortcut]
             # c2 is already set above, will be appended to ch list
         else:
             c2 = ch[f]
