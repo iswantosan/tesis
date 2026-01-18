@@ -146,6 +146,8 @@ from ultralytics.nn.modules import (
     LightAttention,
     SPDDown,
     SPD_A_Block,
+    E_ELAN,
+    ASSN,
     SmallObjectEnhancementHead,
     DWDecoupledHead,
 )
@@ -1345,6 +1347,45 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c_p3, c_p4, c_p5, c_out]
             else:
                 raise ValueError(f"FPI expects list of 3 layer indices in 'from', got {f}")
+        elif m is ASSN:
+            # ASSN receives 3 inputs: [P5, P4, P3A]
+            # Args: [c_p5, c_p4, c_p3, c_out] or can be inferred from input channels
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                # Get channels from input layers (order: P5, P4, P3A)
+                c_p5_in = ch[f[0]]  # P5 channels
+                c_p4_in = ch[f[1]]  # P4 channels
+                c_p3_in = ch[f[2]]  # P3A channels
+                # Args can be [c_p5, c_p4, c_p3, c_out] or just [c_out]
+                if args and len(args) >= 4:
+                    # Full args provided: [c_p5, c_p4, c_p3, c_out]
+                    c_p5_arg = args[0]
+                    c_p4_arg = args[1]
+                    c_p3_arg = args[2]
+                    c_out = args[3]
+                elif args and len(args) == 1:
+                    # Only output channels provided
+                    c_p5_arg = c_p5_in
+                    c_p4_arg = c_p4_in
+                    c_p3_arg = c_p3_in
+                    c_out = args[0]
+                else:
+                    # No args, use inferred channels
+                    c_p5_arg = c_p5_in
+                    c_p4_arg = c_p4_in
+                    c_p3_arg = c_p3_in
+                    c_out = c_p3_in
+                # Apply width scaling
+                if c_p5_arg != nc:
+                    c_p5_arg = make_divisible(min(c_p5_arg, max_channels) * width, 8)
+                if c_p4_arg != nc:
+                    c_p4_arg = make_divisible(min(c_p4_arg, max_channels) * width, 8)
+                if c_p3_arg != nc:
+                    c_p3_arg = make_divisible(min(c_p3_arg, max_channels) * width, 8)
+                if c_out != nc:
+                    c_out = make_divisible(min(c_out, max_channels) * width, 8)
+                args = [c_p5_arg, c_p4_arg, c_p3_arg, c_out]
+            else:
+                raise ValueError(f"ASSN expects list of 3 layer indices in 'from', got {f}")
         elif m is CSFR:
             # CSFR receives 2 inputs: [P3, P4]
             # Args: [c_out] where c_out is output channels
