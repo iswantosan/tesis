@@ -148,6 +148,7 @@ from ultralytics.nn.modules import (
     LightAttention,
     SPDDown,
     SPD_A_Block,
+    Involution,
     E_ELAN,
     ASSN,
     ECABottleneck,
@@ -1133,6 +1134,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             FDEB,
             DPRB,
             C3_EMA,
+            Involution,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)

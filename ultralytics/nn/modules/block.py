@@ -103,6 +103,7 @@ __all__ = (
     "LightAttention",
     "SPDDown",
     "SPD_A_Block",
+    "Involution",
 )
 
 
@@ -7050,3 +7051,148 @@ class AEAP(nn.Module):
         y = self.cv1(x)
         y_branches = [aeac(y) for aeac in self.aeac_branches]
         return self.cv2(torch.cat(y_branches, 1))
+
+
+class Involution(nn.Module):
+    """
+    Involution Block - Dynamic, spatially specific filters for location-aware feature extraction.
+    
+    Unlike traditional convolution with fixed filters (spatial-agnostic), involution uses
+    dynamic, spatially specific filters that are generated per pixel location. This allows
+    the network to better retain location-specific information.
+    
+    Architecture:
+    1. Kernel Generation: Generate a unique K×K kernel for each pixel location
+    2. Channel Reduction: Reduce channels for efficiency (optional)
+    3. Kernel Application: Apply generated kernels uniformly across all channels
+    4. Aggregation: Summation aggregation consolidates features across neighboring pixels
+    
+    Process:
+    - Input: [B, C, H, W]
+    - Generate kernels: [B, K×K, H, W] (one kernel per spatial location)
+    - Unfold input: [B, C, K×K, H, W] (extract patches)
+    - Apply kernels: Element-wise multiply kernels with patches
+    - Aggregate: Sum across kernel window to get [B, C, H, W]
+    
+    Why suitable for small objects:
+    - Preserves spatial context better than standard convolution
+    - Location-specific filters help retain fine-grained details
+    - Dynamic kernel generation adapts to local features
+    - Better for detecting small objects where spatial information is critical
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        kernel_size (int): Kernel size K for involution (default: 7)
+        stride (int): Stride for involution operation (default: 1)
+        groups (int): Number of groups for channel reduction (default: 1)
+        reduction_ratio (int): Channel reduction ratio for kernel generation (default: 4)
+        use_residual (bool): Whether to use residual connection (default: True)
+    """
+    
+    def __init__(self, c1, c2=None, kernel_size=7, stride=1, groups=1, reduction_ratio=4, use_residual=True):
+        """Initialize Involution block."""
+        super().__init__()
+        from .conv import Conv
+        
+        if c2 is None:
+            c2 = c1
+        
+        self.c1 = c1
+        self.c2 = c2
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.groups = groups
+        self.reduction_ratio = reduction_ratio
+        self.use_residual = use_residual and (c1 == c2) and (stride == 1)
+        
+        # Channel reduction for kernel generation (more efficient)
+        self.kernel_gen_channels = max(c1 // reduction_ratio, 1)
+        
+        # Kernel generation: Generate K×K kernels for each spatial location
+        # Output: [B, kernel_size*kernel_size, H, W]
+        self.kernel_gen = nn.Sequential(
+            Conv(c1, self.kernel_gen_channels, k=1, s=1, act=True),
+            Conv(self.kernel_gen_channels, kernel_size * kernel_size * groups, k=1, s=1, act=False)
+        )
+        
+        # Output projection
+        if c1 != c2:
+            self.proj = Conv(c1, c2, k=1, s=1, act=True)
+        else:
+            self.proj = None
+        
+        # Normalization for kernel weights (optional, helps with training stability)
+        self.norm = nn.BatchNorm2d(kernel_size * kernel_size * groups)
+        
+    def forward(self, x):
+        """
+        Forward pass through Involution block.
+        
+        Process:
+        1. Generate dynamic kernels for each spatial location
+        2. Unfold input feature map to extract patches
+        3. Apply kernels to patches (element-wise multiplication)
+        4. Aggregate (sum) across kernel window
+        5. Optional residual connection
+        """
+        B, C, H, W = x.shape
+        identity = x
+        
+        # Step 1: Generate kernels [B, K×K×groups, H, W]
+        # Each spatial location gets its own K×K kernel
+        kernels = self.kernel_gen(x)  # [B, K×K×groups, H, W]
+        kernels = self.norm(kernels)
+        
+        # Normalize kernels (softmax across kernel positions for each location)
+        # Reshape: [B, K×K×groups, H, W] -> [B, groups, K×K, H, W]
+        K = self.kernel_size
+        kernels = kernels.view(B, self.groups, K * K, H, W)
+        kernels = F.softmax(kernels, dim=2)  # Normalize across kernel positions
+        kernels = kernels.view(B, self.groups * K * K, H, W)
+        
+        # Step 2: Unfold input to extract patches
+        # Padding to maintain spatial size
+        pad = K // 2
+        x_unfolded = F.unfold(
+            F.pad(x, [pad, pad, pad, pad], mode='constant', value=0),
+            kernel_size=K,
+            stride=self.stride
+        )  # [B, C×K×K, H×W]
+        
+        # Reshape: [B, C×K×K, H×W] -> [B, C, K×K, H, W]
+        x_unfolded = x_unfolded.view(B, C, K * K, H, W)
+        
+        # Step 3: Apply kernels to patches
+        # For each group, apply corresponding kernels
+        if self.groups > 1:
+            # Group-wise processing
+            C_per_group = C // self.groups
+            outputs = []
+            for g in range(self.groups):
+                # Extract group channels and kernels
+                x_group = x_unfolded[:, g * C_per_group:(g + 1) * C_per_group, :, :, :]  # [B, C//groups, K×K, H, W]
+                kernels_group = kernels[:, g * K * K:(g + 1) * K * K, :, :]  # [B, K×K, H, W]
+                
+                # Apply kernels: [B, C//groups, K×K, H, W] * [B, 1, K×K, H, W]
+                kernels_group = kernels_group.unsqueeze(1)  # [B, 1, K×K, H, W]
+                output_group = (x_group * kernels_group).sum(dim=2)  # Sum across K×K: [B, C//groups, H, W]
+                outputs.append(output_group)
+            
+            # Concatenate groups
+            x = torch.cat(outputs, dim=1)  # [B, C, H, W]
+        else:
+            # Single group: simpler processing
+            # [B, C, K×K, H, W] * [B, 1, K×K, H, W] -> sum across K×K -> [B, C, H, W]
+            kernels = kernels.unsqueeze(1)  # [B, 1, K×K, H, W]
+            x = (x_unfolded * kernels).sum(dim=2)  # [B, C, H, W]
+        
+        # Step 4: Output projection if needed
+        if self.proj is not None:
+            x = self.proj(x)
+        
+        # Step 5: Residual connection (if applicable)
+        if self.use_residual:
+            x = x + identity
+        
+        return x
