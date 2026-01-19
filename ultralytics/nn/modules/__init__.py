@@ -143,6 +143,7 @@ from .block import (
     EAP,
     MEAP,
     AEAP,
+    Involution,
 )
 from .conv import (
     CBAM,
@@ -344,4 +345,5 @@ __all__ = (
     "EAP",
     "MEAP",
     "AEAP",
+    "Involution",
 )
