@@ -582,7 +582,8 @@ class PConv(nn.Module):
         self.dilation = d
         
         # Standard convolution layer (will be masked during forward)
-        self.conv = nn.Conv2d(c1, c2, k, s, self.padding, groups=g, dilation=d, bias=True)
+        # Use bias=False to match Conv pattern and avoid dtype mismatch in mixed precision
+        self.conv = nn.Conv2d(c1, c2, k, s, self.padding, groups=g, dilation=d, bias=False)
         self.bn = nn.BatchNorm2d(c2)
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
         
@@ -609,7 +610,9 @@ class PConv(nn.Module):
         energy = torch.mean(torch.abs(x), dim=1, keepdim=True)  # [B, 1, H, W]
         
         # Generate binary mask: 1 if energy > threshold, else 0
-        mask = (energy > self.mask_threshold).float()
+        # Use same dtype as input to avoid dtype mismatch
+        threshold_tensor = torch.tensor(self.mask_threshold, dtype=x.dtype, device=x.device)
+        mask = (energy > threshold_tensor).to(dtype=x.dtype)
         
         return mask
     
@@ -628,6 +631,9 @@ class PConv(nn.Module):
             y: Output tensor [B, C2, H', W']
             mask_out: Updated mask [B, 1, H', W']
         """
+        # Ensure mask has same dtype and device as input
+        mask = mask.to(dtype=x.dtype, device=x.device)
+        
         # Apply mask to input: zero out invalid regions
         x_masked = x * mask
         
@@ -650,13 +656,16 @@ class PConv(nn.Module):
         
         # Normalization scale: kernel_size^2 / (valid_pixels + eps)
         # This compensates for partial support in the convolution window
-        scale = (self.kernel_size * self.kernel_size) / (valid_count + self.eps)
+        # Ensure scale has same dtype as y
+        eps_tensor = torch.tensor(self.eps, dtype=y.dtype, device=y.device)
+        scale = (self.kernel_size * self.kernel_size) / (valid_count.to(y.dtype) + eps_tensor)
         
         # Apply normalization
         y = y * scale
         
         # Update output mask: 1 if any valid pixels in window, else 0
-        mask_out = (valid_count > 0).float()
+        # Keep mask in same dtype as input for consistency
+        mask_out = (valid_count > 0).to(dtype=x.dtype)
         
         return y, mask_out
     
