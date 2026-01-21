@@ -25,7 +25,8 @@ __all__ = (
     "SPDConv",
     "SPDConv_CA",
     "SmallObjectBlock",
-    "DendriticConv2d"
+    "DendriticConv2d",
+    "PConv",
 )
 
 
@@ -529,3 +530,176 @@ class DendriticConv2d(nn.Module):
         output = sum(gates[:, b:b+1, :, :] * branch_feats[b] for b in range(self.branches))
         
         return output
+
+
+class PConv(nn.Module):
+    """
+    Partial Convolution (PConv) for selective feature extraction.
+    
+    Originally proposed for image inpainting, PConv applies convolution operations only
+    over valid pixels in the input feature map, while maintaining identity mapping over
+    invalid or irrelevant areas (occluded zones, background clutter, missing pixels).
+    
+    This design improves both the specificity and sparsity of feature representations,
+    making it particularly effective for:
+    - UAV imagery with occlusions, shadows, and motion blur
+    - Road scenes with occlusions and image degradation
+    - Small object detection in low-contrast regions
+    - Ambiguous boundary regions where traditional convolution produces blurred responses
+    
+    Architecture:
+    - Dynamic binary mask generation from input features
+    - Mask-guided partial convolution (only valid regions)
+    - Normalization to compensate for partial support
+    - Optional identity-preserving for invalid regions
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride (default: 1)
+        p (int): Padding (auto-calculated if None)
+        g (int): Groups (default: 1)
+        d (int): Dilation (default: 1)
+        act (bool): Activation (default: True)
+        use_identity (bool): Use identity mapping for invalid regions (default: True)
+        mask_threshold (float): Threshold for dynamic mask generation (default: 0.1)
+        eps (float): Epsilon for numerical stability (default: 1e-8)
+    """
+    
+    default_act = nn.SiLU()  # default activation
+    
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True, 
+                 use_identity=True, mask_threshold=0.1, eps=1e-8):
+        """Initialize PConv module."""
+        super().__init__()
+        self.use_identity = use_identity
+        self.mask_threshold = mask_threshold
+        self.eps = eps
+        self.kernel_size = k
+        self.stride = s
+        self.padding = autopad(k, p, d) if p is None else p
+        self.dilation = d
+        
+        # Standard convolution layer (will be masked during forward)
+        self.conv = nn.Conv2d(c1, c2, k, s, self.padding, groups=g, dilation=d, bias=True)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        
+        # Optional 1x1 projection for identity mapping when channel mismatch
+        if use_identity and c1 != c2:
+            self.identity_proj = nn.Conv2d(c1, c2, 1, 1, 0, bias=False)
+        else:
+            self.identity_proj = None
+    
+    def build_mask_from_feature(self, x):
+        """
+        Generate dynamic binary mask from input features.
+        
+        Uses feature energy (mean absolute value) to identify valid regions.
+        Regions with energy above threshold are considered valid.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            
+        Returns:
+            mask: Binary mask [B, 1, H, W] (1 = valid, 0 = invalid)
+        """
+        # Compute feature energy: mean absolute value across channels
+        energy = torch.mean(torch.abs(x), dim=1, keepdim=True)  # [B, 1, H, W]
+        
+        # Generate binary mask: 1 if energy > threshold, else 0
+        mask = (energy > self.mask_threshold).float()
+        
+        return mask
+    
+    def partial_conv2d(self, x, mask):
+        """
+        Apply partial convolution with mask guidance.
+        
+        Convolution is applied only to valid regions (where mask=1), with proper
+        normalization to compensate for partial support.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            mask: Binary mask [B, 1, H, W] (1 = valid, 0 = invalid)
+            
+        Returns:
+            y: Output tensor [B, C2, H', W']
+            mask_out: Updated mask [B, 1, H', W']
+        """
+        # Apply mask to input: zero out invalid regions
+        x_masked = x * mask
+        
+        # Standard convolution on masked input
+        y = self.conv(x_masked)
+        
+        # Compute valid pixel count for each output position
+        # Use unfold to extract local windows from mask
+        mask_padded = nn.functional.pad(mask, [self.padding] * 4, mode='constant', value=0)
+        mask_unfold = nn.functional.unfold(
+            mask_padded,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
+            dilation=self.dilation
+        )  # [B, k*k, H'*W']
+        
+        # Count valid pixels in each window
+        valid_count = mask_unfold.sum(dim=1, keepdim=True)  # [B, 1, H'*W']
+        valid_count = valid_count.view(y.shape[0], 1, y.shape[2], y.shape[3])  # [B, 1, H', W']
+        
+        # Normalization scale: kernel_size^2 / (valid_pixels + eps)
+        # This compensates for partial support in the convolution window
+        scale = (self.kernel_size * self.kernel_size) / (valid_count + self.eps)
+        
+        # Apply normalization
+        y = y * scale
+        
+        # Update output mask: 1 if any valid pixels in window, else 0
+        mask_out = (valid_count > 0).float()
+        
+        return y, mask_out
+    
+    def forward(self, x, mask=None):
+        """
+        Forward pass through PConv.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            mask: Optional external mask [B, 1, H, W]. If None, generated dynamically.
+            
+        Returns:
+            Output tensor [B, C2, H', W']
+        """
+        # Generate mask if not provided
+        if mask is None:
+            mask = self.build_mask_from_feature(x)
+        
+        # Apply partial convolution
+        y_pconv, mask_out = self.partial_conv2d(x, mask)
+        
+        # Apply batch normalization and activation
+        y_pconv = self.act(self.bn(y_pconv))
+        
+        # Identity-preserving for invalid regions
+        if self.use_identity:
+            # Project input if channel mismatch
+            if self.identity_proj is not None:
+                x_proj = self.identity_proj(x)
+            else:
+                x_proj = x
+            
+            # Downsample/upsample x_proj to match output size if needed
+            if x_proj.shape[2:] != y_pconv.shape[2:]:
+                x_proj = nn.functional.interpolate(
+                    x_proj, 
+                    size=y_pconv.shape[2:], 
+                    mode='nearest'
+                )
+            
+            # Combine: PConv output for valid regions, identity for invalid regions
+            y = y_pconv * mask_out + x_proj * (1 - mask_out)
+        else:
+            y = y_pconv
+        
+        return y

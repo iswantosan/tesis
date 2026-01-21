@@ -158,6 +158,7 @@ from .conv import (
     GhostConv,
     Index,
     LightConv,
+    PConv,
     RepConv,
     SpatialAttention,
     SPDConv,
