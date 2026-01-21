@@ -47,6 +47,7 @@ from ultralytics.nn.modules import (
     Conv2,
     ConvTranspose,
     PConv,
+    P3Shortcut,
     Detect,
     DecoupledP3Detect,
     DecoupledDetect,
@@ -1199,6 +1200,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is P3Shortcut:
+            # P3Shortcut receives 2 inputs: [backbone_p3, head_p3]
+            # Args: [c2] where c2 is output channels (should match head_p3 channels)
+            # Input channels are auto-inferred from f (list of 2 layer indices)
+            if isinstance(f, (list, tuple)) and len(f) == 2:
+                c1_backbone = ch[f[0]]  # Backbone P3 channels
+                c1_head = ch[f[1]]       # Head P3 channels
+                c2 = args[0] if args else c1_head  # Output channels (default: head P3 channels)
+                if c2 != nc:  # if c2 not equal to number of classes
+                    c2 = make_divisible(min(c2, max_channels) * width, 8)
+                args = [c1_backbone, c2]  # P3Shortcut takes (c1=backbone, c2=output)
+            else:
+                raise ValueError(f"P3Shortcut expects list of 2 layer indices in 'from', got {f}")
         elif m is USF:
             # USF receives 2 inputs: high-res and low-res
             # Args: [c2, n, use_residual] where c2 is output channels

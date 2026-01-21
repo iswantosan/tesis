@@ -159,6 +159,7 @@ from .conv import (
     Index,
     LightConv,
     PConv,
+    P3Shortcut,
     RepConv,
     SpatialAttention,
     SPDConv,

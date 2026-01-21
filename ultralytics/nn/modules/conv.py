@@ -27,6 +27,7 @@ __all__ = (
     "SmallObjectBlock",
     "DendriticConv2d",
     "PConv",
+    "P3Shortcut",
 )
 
 
@@ -712,3 +713,50 @@ class PConv(nn.Module):
             y = y_pconv
         
         return y
+
+
+class P3Shortcut(nn.Module):
+    """
+    P3 Shortcut Connection for feature reuse from backbone to head.
+    
+    This module creates a lightweight shortcut from backbone P3 directly to Detect P3,
+    preserving detailed information that might be lost during neck processing.
+    
+    Architecture:
+    - Project backbone P3 with Conv1x1 to match head P3 channels
+    - Element-wise addition with head P3 output
+    - Preserves spatial details from backbone
+    
+    Args:
+        c1 (int): Input channels from backbone P3
+        c2 (int): Output channels (should match head P3 channels)
+        act (bool): Activation (default: False, no activation for shortcut)
+    """
+    
+    def __init__(self, c1, c2, act=False):
+        """Initialize P3Shortcut module."""
+        super().__init__()
+        # Lightweight 1x1 projection to match channels
+        self.proj = Conv(c1, c2, k=1, s=1, act=act)
+    
+    def forward(self, x):
+        """
+        Forward pass through P3Shortcut.
+        
+        Args:
+            x: List of two tensors [backbone_p3, head_p3]
+               - backbone_p3: [B, C1, H, W] from backbone P3
+               - head_p3: [B, C2, H, W] from head P3
+               
+        Returns:
+            Output tensor [B, C2, H, W] = head_p3 + proj(backbone_p3)
+        """
+        backbone_p3, head_p3 = x[0], x[1]
+        
+        # Project backbone P3 to match head P3 channels
+        backbone_proj = self.proj(backbone_p3)
+        
+        # Element-wise addition
+        output = head_p3 + backbone_proj
+        
+        return output
