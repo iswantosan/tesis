@@ -1839,52 +1839,32 @@ class DualAttention(nn.Module):
     """
     Dual Attention (DA) mechanism for small object detection.
     
-    Combines two attention modules:
-    1. Global Grouped Coordinate Attention (GGCA): Global attention (area=1) with coordinate attention
-       for enhanced global information retention and contextual integration.
-    2. Median Pooling-Enhanced Multi-Scale Attention (MPSA): Local attention (area=2) with multi-scale
-       pooling for increased noise resilience and refined multi-scale features.
-    
-    Architecture:
-    - Split input into 2 branches
-    - Branch 1 (Global): Area attention (area=1) + Coordinate Attention
-    - Branch 2 (Local): Area attention (area=2) + Multi-scale pooling + Channel attention
+    Simplified version using Channel Attention:
+    - Global branch: Area attention (area=1) + Channel Attention
+    - Local branch: Area attention (area=2) + Channel Attention
     - Fusion layer to combine both branches
-    - Optional pooling for feature refinement
     
     Args:
         dim (int): Input/Output channel dimension
         num_heads (int): Number of attention heads
         mlp_ratio (float): MLP expansion ratio (default: 1.2)
-        use_pooling (bool): Whether to use median pooling after fusion (default: False)
-        pool_kernel (int): Kernel size for median pooling (default: 3)
     """
     
-    def __init__(self, dim, num_heads, mlp_ratio=1.2, use_pooling=False, pool_kernel=3):
+    def __init__(self, dim, num_heads, mlp_ratio=1.2):
         """Initialize DualAttention block."""
         super().__init__()
-        from .conv import CoordinateAttention, ChannelAttention
+        from .conv import ChannelAttention
         
-        # Global branch: area=1 attention + coordinate attention
+        # Global branch: area=1 attention + channel attention
         self.global_attn = ABlock(dim, num_heads, mlp_ratio, area=1)
-        self.global_coord_attn = CoordinateAttention(dim, dim, reduction=32)
+        self.global_channel_attn = ChannelAttention(dim)
         
-        # Local branch: area=2 attention + multi-scale pooling
+        # Local branch: area=2 attention + channel attention
         self.local_attn = ABlock(dim, num_heads, mlp_ratio, area=2)
-        # Multi-scale pooling: 1x1, 3x3, 5x5
-        self.local_pool1 = nn.AdaptiveAvgPool2d(1)  # Global context
-        self.local_pool3 = MedianPooling2d(3, stride=1, padding=1)  # Local context
-        self.local_pool5 = MedianPooling2d(5, stride=1, padding=2)  # Extended context
         self.local_channel_attn = ChannelAttention(dim)
         
         # Fusion layer: combine global and local features
         self.fusion_conv = Conv(dim * 2, dim, k=1, s=1)
-        
-        # Optional pooling for feature refinement
-        self.use_pooling = use_pooling
-        if use_pooling:
-            self.final_pool = MedianPooling2d(pool_kernel, stride=1, padding=pool_kernel//2)
-            self.final_conv = Conv(dim, dim, k=1, s=1)
     
     def forward(self, x):
         """
@@ -1898,32 +1878,17 @@ class DualAttention(nn.Module):
         """
         identity = x
         
-        # Global branch: area=1 attention + coordinate attention
+        # Global branch: area=1 attention + channel attention
         global_feat = self.global_attn(x)
-        global_feat = self.global_coord_attn(global_feat)
+        global_feat = self.global_channel_attn(global_feat)
         
-        # Local branch: area=2 attention + multi-scale pooling
+        # Local branch: area=2 attention + channel attention
         local_feat = self.local_attn(x)
-        
-        # Multi-scale pooling and fusion
-        B, C, H, W = local_feat.shape
-        local_pool1 = self.local_pool1(local_feat).expand_as(local_feat)  # [B, C, H, W]
-        local_pool3 = self.local_pool3(local_feat)  # [B, C, H, W]
-        local_pool5 = self.local_pool5(local_feat)  # [B, C, H, W]
-        
-        # Combine multi-scale features
-        local_multi = (local_pool1 + local_pool3 + local_pool5) / 3.0
-        local_feat = local_feat + local_multi
         local_feat = self.local_channel_attn(local_feat)
         
         # Fusion: concatenate global and local features
         fused = torch.cat([global_feat, local_feat], dim=1)  # [B, 2*C, H, W]
         fused = self.fusion_conv(fused)  # [B, C, H, W]
-        
-        # Optional pooling for refinement
-        if self.use_pooling:
-            fused = self.final_pool(fused)
-            fused = self.final_conv(fused)
         
         # Residual connection
         return identity + fused
@@ -1980,7 +1945,7 @@ class A2C2fDA(nn.Module):
         # a2 parameter is kept for compatibility but always uses DualAttention
         if a2:
             self.m = nn.ModuleList(
-                DualAttention(c_, num_heads, mlp_ratio, use_pooling=False) for _ in range(n)
+                DualAttention(c_, num_heads, mlp_ratio) for _ in range(n)
             )
         else:
             # Fallback to C3k if a2=False (for compatibility)
