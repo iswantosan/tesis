@@ -1775,6 +1775,211 @@ class A2C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
+class MedianPooling2d(nn.Module):
+    """
+    Median Pooling 2D for noise-resilient feature extraction.
+    
+    Median pooling is more robust to outliers and noise compared to average pooling,
+    making it suitable for small object detection in complex backgrounds.
+    
+    Args:
+        kernel_size (int or tuple): Size of the pooling kernel
+        stride (int or tuple, optional): Stride of pooling. Defaults to kernel_size
+        padding (int or tuple, optional): Padding. Defaults to 0
+    """
+    
+    def __init__(self, kernel_size, stride=None, padding=0):
+        """Initialize MedianPooling2d."""
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride if stride is not None else kernel_size
+        self.padding = padding
+    
+    def forward(self, x):
+        """
+        Forward pass through median pooling.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Pooled features [B, C, H', W']
+        """
+        # Unfold the input tensor
+        B, C, H, W = x.shape
+        kh, kw = self.kernel_size if isinstance(self.kernel_size, tuple) else (self.kernel_size, self.kernel_size)
+        sh, sw = self.stride if isinstance(self.stride, tuple) else (self.stride, self.stride)
+        ph, pw = self.padding if isinstance(self.padding, tuple) else (self.padding, self.padding)
+        
+        # Apply padding
+        if ph > 0 or pw > 0:
+            x = F.pad(x, (pw, pw, ph, ph))
+        
+        # Unfold to get patches
+        x_unfolded = F.unfold(x, kernel_size=(kh, kw), stride=(sh, sw))
+        # Reshape: [B, C*kh*kw, num_patches] -> [B, C, kh*kw, num_patches]
+        x_unfolded = x_unfolded.view(B, C, kh * kw, -1)
+        
+        # Compute median along the kernel dimension
+        x_median, _ = torch.median(x_unfolded, dim=2, keepdim=False)
+        
+        # Reshape back to spatial dimensions
+        out_h = (H + 2 * ph - kh) // sh + 1
+        out_w = (W + 2 * pw - kw) // sw + 1
+        x_median = x_median.view(B, C, out_h, out_w)
+        
+        return x_median
+
+
+class DualAttention(nn.Module):
+    """
+    Dual Attention (DA) mechanism for small object detection.
+    
+    Combines two attention modules:
+    1. Global Grouped Coordinate Attention (GGCA): Global attention (area=1) with coordinate attention
+       for enhanced global information retention and contextual integration.
+    2. Median Pooling-Enhanced Multi-Scale Attention (MPSA): Local attention (area=2) with multi-scale
+       pooling for increased noise resilience and refined multi-scale features.
+    
+    Architecture:
+    - Split input into 2 branches
+    - Branch 1 (Global): Area attention (area=1) + Coordinate Attention
+    - Branch 2 (Local): Area attention (area=2) + Multi-scale pooling + Channel attention
+    - Fusion layer to combine both branches
+    - Optional pooling for feature refinement
+    
+    Args:
+        dim (int): Input/Output channel dimension
+        num_heads (int): Number of attention heads
+        mlp_ratio (float): MLP expansion ratio (default: 1.2)
+        use_pooling (bool): Whether to use median pooling after fusion (default: False)
+        pool_kernel (int): Kernel size for median pooling (default: 3)
+    """
+    
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, use_pooling=False, pool_kernel=3):
+        """Initialize DualAttention block."""
+        super().__init__()
+        from .conv import CoordinateAttention, ChannelAttention
+        
+        # Global branch: area=1 attention + coordinate attention
+        self.global_attn = ABlock(dim, num_heads, mlp_ratio, area=1)
+        self.global_coord_attn = CoordinateAttention(dim, dim, reduction=32)
+        
+        # Local branch: area=2 attention + multi-scale pooling
+        self.local_attn = ABlock(dim, num_heads, mlp_ratio, area=2)
+        # Multi-scale pooling: 1x1, 3x3, 5x5
+        self.local_pool1 = nn.AdaptiveAvgPool2d(1)  # Global context
+        self.local_pool3 = MedianPooling2d(3, stride=1, padding=1)  # Local context
+        self.local_pool5 = MedianPooling2d(5, stride=1, padding=2)  # Extended context
+        self.local_channel_attn = ChannelAttention(dim)
+        
+        # Fusion layer: combine global and local features
+        self.fusion_conv = Conv(dim * 2, dim, k=1, s=1)
+        
+        # Optional pooling for feature refinement
+        self.use_pooling = use_pooling
+        if use_pooling:
+            self.final_pool = MedianPooling2d(pool_kernel, stride=1, padding=pool_kernel//2)
+            self.final_conv = Conv(dim, dim, k=1, s=1)
+    
+    def forward(self, x):
+        """
+        Forward pass through DualAttention.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with dual attention [B, C, H, W]
+        """
+        identity = x
+        
+        # Global branch: area=1 attention + coordinate attention
+        global_feat = self.global_attn(x)
+        global_feat = self.global_coord_attn(global_feat)
+        
+        # Local branch: area=2 attention + multi-scale pooling
+        local_feat = self.local_attn(x)
+        
+        # Multi-scale pooling and fusion
+        B, C, H, W = local_feat.shape
+        local_pool1 = self.local_pool1(local_feat).expand_as(local_feat)  # [B, C, H, W]
+        local_pool3 = self.local_pool3(local_feat)  # [B, C, H, W]
+        local_pool5 = self.local_pool5(local_feat)  # [B, C, H, W]
+        
+        # Combine multi-scale features
+        local_multi = (local_pool1 + local_pool3 + local_pool5) / 3.0
+        local_feat = local_feat + local_multi
+        local_feat = self.local_channel_attn(local_feat)
+        
+        # Fusion: concatenate global and local features
+        fused = torch.cat([global_feat, local_feat], dim=1)  # [B, 2*C, H, W]
+        fused = self.fusion_conv(fused)  # [B, C, H, W]
+        
+        # Optional pooling for refinement
+        if self.use_pooling:
+            fused = self.final_pool(fused)
+            fused = self.final_conv(fused)
+        
+        # Residual connection
+        return identity + fused
+
+
+class A2C2fDA(nn.Module):
+    """
+    A2C2f module with Dual Attention (DA) mechanism for small object detection.
+    
+    This module extends A2C2f by replacing standard area attention with DualAttention,
+    which combines global and local attention mechanisms for enhanced small object detection.
+    
+    Attributes:
+        c1 (int): Number of input channels
+        c2 (int): Number of output channels
+        n (int): Number of DualAttention modules to stack (default: 1)
+        mlp_ratio (float): MLP expansion ratio (default: 1.2)
+        e (float): Expansion ratio (default: 0.5)
+        g (int): Number of groups for grouped convolution (default: 1)
+        shortcut (bool): Whether to use shortcut connection (default: True)
+        use_pooling (bool): Whether to use pooling in DualAttention (default: False)
+    
+    Methods:
+        forward: Performs a forward pass through the A2C2fDA module.
+    
+    Examples:
+        >>> import torch
+        >>> from ultralytics.nn.modules import A2C2fDA
+        >>> model = A2C2fDA(c1=512, c2=512, n=4, e=0.5)
+        >>> x = torch.randn(2, 512, 32, 32)
+        >>> output = model(x)
+        >>> print(output.shape)
+    """
+    
+    def __init__(self, c1, c2, n=1, mlp_ratio=1.2, e=0.5, g=1, shortcut=True, use_pooling=False):
+        """Initialize A2C2fDA with DualAttention."""
+        super().__init__()
+        # Hardcode e to 0.5 if invalid
+        if not isinstance(e, (int, float)):
+            e = 0.5
+        c_ = int(c2 * e)  # hidden channels
+        assert c_ % 32 == 0, "Dimension of DualAttention must be a multiple of 32."
+        
+        num_heads = c_ // 32
+        
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv((1 + n) * c_, c2, 1)
+        
+        # Use DualAttention instead of ABlock
+        self.m = nn.ModuleList(
+            DualAttention(c_, num_heads, mlp_ratio, use_pooling=use_pooling) for _ in range(n)
+        )
+    
+    def forward(self, x):
+        """Forward pass through A2C2fDA layer."""
+        y = [self.cv1(x)]
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+
 class SmallObjectBlock(nn.Module):
     """
     Advanced Small Object Detection Block optimized for BTA/AFB detection.
