@@ -80,6 +80,7 @@ from ultralytics.nn.modules import (
     WorldDetect,
     v10Detect,
     A2C2f,
+    A2C2fDA,
     SmallObjectBlock,
     RFCBAM,
     DySample,
@@ -1167,6 +1168,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fCIB,
                 C2PSA,
                 A2C2f,
+                A2C2fDA,
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1186,6 +1188,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 if scale in "lx":  # for L/X sizes
                     args.append(True)
                     args.append(1.5)
+            if m is A2C2fDA:
+                legacy = False
+                # A2C2fDA uses same signature as A2C2f for compatibility
+                # YAML format: [c2, a2, area] -> [c1, c2, n, a2, area, ...]
+                # Default values handled in __init__
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock}:

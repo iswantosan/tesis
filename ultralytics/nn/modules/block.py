@@ -1814,18 +1814,22 @@ class MedianPooling2d(nn.Module):
         # Apply padding
         if ph > 0 or pw > 0:
             x = F.pad(x, (pw, pw, ph, ph))
+            H_padded, W_padded = H + 2 * ph, W + 2 * pw
+        else:
+            H_padded, W_padded = H, W
         
         # Unfold to get patches
         x_unfolded = F.unfold(x, kernel_size=(kh, kw), stride=(sh, sw))
         # Reshape: [B, C*kh*kw, num_patches] -> [B, C, kh*kw, num_patches]
-        x_unfolded = x_unfolded.view(B, C, kh * kw, -1)
+        num_patches = x_unfolded.shape[2]
+        x_unfolded = x_unfolded.view(B, C, kh * kw, num_patches)
         
         # Compute median along the kernel dimension
         x_median, _ = torch.median(x_unfolded, dim=2, keepdim=False)
         
         # Reshape back to spatial dimensions
-        out_h = (H + 2 * ph - kh) // sh + 1
-        out_w = (W + 2 * pw - kw) // sw + 1
+        out_h = (H_padded - kh) // sh + 1
+        out_w = (W_padded - kw) // sw + 1
         x_median = x_median.view(B, C, out_h, out_w)
         
         return x_median
@@ -1932,15 +1936,19 @@ class A2C2fDA(nn.Module):
     This module extends A2C2f by replacing standard area attention with DualAttention,
     which combines global and local attention mechanisms for enhanced small object detection.
     
+    Compatible with A2C2f signature for YAML parsing.
+    
     Attributes:
         c1 (int): Number of input channels
         c2 (int): Number of output channels
         n (int): Number of DualAttention modules to stack (default: 1)
+        a2 (bool): Whether to use DualAttention (default: True, kept for compatibility)
+        area (int): Area parameter (ignored, kept for compatibility with A2C2f signature)
+        residual (bool): Whether to use residual connection (default: False)
         mlp_ratio (float): MLP expansion ratio (default: 1.2)
         e (float): Expansion ratio (default: 0.5)
         g (int): Number of groups for grouped convolution (default: 1)
         shortcut (bool): Whether to use shortcut connection (default: True)
-        use_pooling (bool): Whether to use pooling in DualAttention (default: False)
     
     Methods:
         forward: Performs a forward pass through the A2C2fDA module.
@@ -1954,7 +1962,7 @@ class A2C2fDA(nn.Module):
         >>> print(output.shape)
     """
     
-    def __init__(self, c1, c2, n=1, mlp_ratio=1.2, e=0.5, g=1, shortcut=True, use_pooling=False):
+    def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=1.2, e=0.5, g=1, shortcut=True):
         """Initialize A2C2fDA with DualAttention."""
         super().__init__()
         # Hardcode e to 0.5 if invalid
@@ -1969,15 +1977,30 @@ class A2C2fDA(nn.Module):
         self.cv2 = Conv((1 + n) * c_, c2, 1)
         
         # Use DualAttention instead of ABlock
-        self.m = nn.ModuleList(
-            DualAttention(c_, num_heads, mlp_ratio, use_pooling=use_pooling) for _ in range(n)
-        )
+        # a2 parameter is kept for compatibility but always uses DualAttention
+        if a2:
+            self.m = nn.ModuleList(
+                DualAttention(c_, num_heads, mlp_ratio, use_pooling=False) for _ in range(n)
+            )
+        else:
+            # Fallback to C3k if a2=False (for compatibility)
+            from .block import C3k
+            self.m = nn.ModuleList(
+                C3k(c_, c_, 2, shortcut, g) for _ in range(n)
+            )
+        
+        # Residual connection with layer scale (if enabled)
+        init_values = 0.01
+        self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if residual else None
     
     def forward(self, x):
         """Forward pass through A2C2fDA layer."""
         y = [self.cv1(x)]
         y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
+        out = self.cv2(torch.cat(y, 1))
+        if self.gamma is not None:
+            return x + self.gamma.view(1, -1, 1, 1) * out
+        return out
 
 
 class SmallObjectBlock(nn.Module):
