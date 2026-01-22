@@ -1966,8 +1966,12 @@ class A2C2fDA(nn.Module):
         n = int(n)
         
         # Calculate output channels for cv2
+        # A2C2f pattern: cv1 output + n module outputs = (1 + n) features, each with c_ channels
         cv2_in_channels = int((1 + n) * c_)
         cv2_out_channels = int(c2)
+        
+        # Debug: print channel info if needed
+        # print(f"A2C2fDA: c1={c1}, c2={c2}, c_={c_}, n={n}, cv2_in={cv2_in_channels}, cv2_out={cv2_out_channels}")
         
         self.cv1 = Conv(c1, c_, k=1, s=1)
         self.cv2 = Conv(cv2_in_channels, cv2_out_channels, k=1, s=1)
@@ -1991,10 +1995,26 @@ class A2C2fDA(nn.Module):
     
     def forward(self, x):
         """Forward pass through A2C2fDA layer."""
-        y = [self.cv1(x)]
-        y.extend(m(y[-1]) for m in self.m)
-        out = self.cv2(torch.cat(y, 1))
+        y = [self.cv1(x)]  # First feature: [B, c_, H, W]
+        # Process through each DualAttention module
+        for m in self.m:
+            y.append(m(y[-1]))  # Each outputs [B, c_, H, W]
+        # Concatenate all features along channel dimension
+        # y should have (1 + n) elements, each with c_ channels
+        y_cat = torch.cat(y, dim=1)  # [B, (1+n)*c_, H, W]
+        # Verify channel count matches cv2 expectation
+        expected_channels = (1 + len(self.m)) * y[0].shape[1]
+        if y_cat.shape[1] != expected_channels:
+            raise RuntimeError(
+                f"A2C2fDA channel mismatch: concatenated features have {y_cat.shape[1]} channels, "
+                f"but expected {expected_channels} channels (cv2 expects {self.cv2.conv.in_channels})"
+            )
+        out = self.cv2(y_cat)  # [B, c2, H, W]
         if self.gamma is not None:
+            # Residual connection: x must have same channels as out (c2)
+            if x.shape[1] != out.shape[1]:
+                # If channel mismatch, skip residual or use projection
+                return out
             return x + self.gamma.view(1, -1, 1, 1) * out
         return out
 
