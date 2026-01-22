@@ -1855,6 +1855,21 @@ class DualAttention(nn.Module):
         super().__init__()
         from .conv import ChannelAttention
         
+        # Validate and convert inputs
+        dim = int(dim)
+        num_heads = int(num_heads)
+        mlp_ratio = float(mlp_ratio) if isinstance(mlp_ratio, (int, float)) else 1.2
+        
+        # Ensure dim is valid (must be multiple of 32 for ABlock)
+        if dim < 32:
+            dim = 32
+        if dim % 32 != 0:
+            dim = ((dim + 31) // 32) * 32  # Round up to nearest multiple of 32
+        
+        # Ensure num_heads is valid
+        if num_heads < 1:
+            num_heads = max(1, dim // 32)
+        
         # Global branch: area=1 attention + channel attention
         self.global_attn = ABlock(dim, num_heads, mlp_ratio, area=1)
         self.global_channel_attn = ChannelAttention(dim)
@@ -1933,13 +1948,29 @@ class A2C2fDA(nn.Module):
         # Hardcode e to 0.5 if invalid
         if not isinstance(e, (int, float)):
             e = 0.5
+        # Ensure e is a valid number
+        e = float(e) if isinstance(e, (int, float)) else 0.5
         c_ = int(c2 * e)  # hidden channels
-        assert c_ % 32 == 0, "Dimension of DualAttention must be a multiple of 32."
+        # Make sure c_ is divisible by 32 and at least 32
+        if c_ % 32 != 0:
+            c_ = ((c_ + 31) // 32) * 32  # Round up to nearest multiple of 32
+        if c_ < 32:
+            c_ = 32  # Minimum 32 channels
         
-        num_heads = c_ // 32
+        num_heads = max(1, c_ // 32)  # At least 1 head
         
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv((1 + n) * c_, c2, 1)
+        # Ensure all channel values are integers
+        c1 = int(c1)
+        c2 = int(c2)
+        c_ = int(c_)
+        n = int(n)
+        
+        # Calculate output channels for cv2
+        cv2_in_channels = int((1 + n) * c_)
+        cv2_out_channels = int(c2)
+        
+        self.cv1 = Conv(c1, c_, k=1, s=1)
+        self.cv2 = Conv(cv2_in_channels, cv2_out_channels, k=1, s=1)
         
         # Use DualAttention instead of ABlock
         # a2 parameter is kept for compatibility but always uses DualAttention
