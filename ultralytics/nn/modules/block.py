@@ -1721,14 +1721,16 @@ class DualAttn(nn.Module):
     """
     Dual attention block:
       - Local attention: AAttn (area-based) -> uses your existing AAttn
-      - Global/channel attention: ECA
+      - Global/channel attention: ChannelAttention
       - Fusion: learnable weighted sum + optional 1x1 Conv mixing
       - Residual add
     """
-    def __init__(self, dim, num_heads, local_area=1, eca_k=3, use_mix_conv=True):
+    def __init__(self, dim, num_heads, local_area=1, use_mix_conv=True):
         super().__init__()
+        from .conv import ChannelAttention
+        
         self.local = AAttn(dim=dim, num_heads=num_heads, area=local_area)
-        self.global_ca = ECA(c=dim, k_size=eca_k)
+        self.global_ca = ChannelAttention(dim)
 
         # learnable fusion weights (start balanced)
         self.alpha = nn.Parameter(torch.tensor(0.5))
@@ -1752,9 +1754,9 @@ class ABlockDual(nn.Module):
     ABlock variant that uses DualAttn instead of only AAttn.
     Keeps the same MLP structure as your ABlock.
     """
-    def __init__(self, dim, num_heads, mlp_ratio=1.2, local_area=1, eca_k=3):
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, local_area=1):
         super().__init__()
-        self.attn = DualAttn(dim=dim, num_heads=num_heads, local_area=local_area, eca_k=eca_k, use_mix_conv=True)
+        self.attn = DualAttn(dim=dim, num_heads=num_heads, local_area=local_area, use_mix_conv=True)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -1783,7 +1785,7 @@ class A2C2fDual(nn.Module):
     """
     def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False,
                  mlp_ratio=2.0, e=0.5, g=1, shortcut=True,
-                 local_area=1, eca_k=3):
+                 local_area=1):
         super().__init__()
         if not isinstance(e, (int, float)):
             e = 0.5
@@ -1797,9 +1799,9 @@ class A2C2fDual(nn.Module):
         init_values = 0.01
         self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if a2 and residual else None
 
-        # NOTE: area param existing kamu tetap ada, tapi untuk dual attention kita pakai local_area + eca_k
+        # NOTE: area param existing kamu tetap ada, tapi untuk dual attention kita pakai local_area dengan ChannelAttention
         self.m = nn.ModuleList(
-            nn.Sequential(*(ABlockDual(c_, num_heads, mlp_ratio, local_area=local_area, eca_k=eca_k) for _ in range(2)))
+            nn.Sequential(*(ABlockDual(c_, num_heads, mlp_ratio, local_area=local_area) for _ in range(2)))
             if a2 else C3k(c_, c_, 2, shortcut, g)
             for _ in range(n)
         )
