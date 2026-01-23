@@ -104,6 +104,9 @@ __all__ = (
     "SPDDown",
     "SPD_A_Block",
     "Involution",
+    "DualAttn",
+    "ABlockDual",
+    "A2C2fDual",
 )
 
 
@@ -1714,6 +1717,100 @@ class ABlock(nn.Module):
         x = x + self.mlp(x)
         return x
 
+class DualAttn(nn.Module):
+    """
+    Dual attention block:
+      - Local attention: AAttn (area-based) -> uses your existing AAttn
+      - Global/channel attention: ECA
+      - Fusion: learnable weighted sum + optional 1x1 Conv mixing
+      - Residual add
+    """
+    def __init__(self, dim, num_heads, local_area=1, eca_k=3, use_mix_conv=True):
+        super().__init__()
+        self.local = AAttn(dim=dim, num_heads=num_heads, area=local_area)
+        self.global_ca = ECA(c=dim, k_size=eca_k)
+
+        # learnable fusion weights (start balanced)
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+        self.beta  = nn.Parameter(torch.tensor(0.5))
+
+        self.mix = Conv(dim, dim, 1, act=False) if use_mix_conv else nn.Identity()
+
+    def forward(self, x):
+        # local branch returns a feature map (same shape as x) in your AAttn usage patterns
+        xl = self.local(x)             # (B,C,H,W)
+        xg = self.global_ca(x)         # (B,C,H,W)
+
+        y = self.alpha * xl + self.beta * xg
+        y = self.mix(y)
+
+        return x + y   # residual for stability
+
+
+class ABlockDual(nn.Module):
+    """
+    ABlock variant that uses DualAttn instead of only AAttn.
+    Keeps the same MLP structure as your ABlock.
+    """
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, local_area=1, eca_k=3):
+        super().__init__()
+        self.attn = DualAttn(dim=dim, num_heads=num_heads, local_area=local_area, eca_k=eca_k, use_mix_conv=True)
+
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            Conv(dim, mlp_hidden_dim, 1),
+            Conv(mlp_hidden_dim, dim, 1, act=False)
+        )
+
+        # keep init style consistent with your ABlock
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.attn(x)       # already residual inside DualAttn
+        x = x + self.mlp(x)
+        return x
+
+class A2C2fDual(nn.Module):
+    """
+    A2C2f variant that stacks ABlockDual blocks (dual attention).
+    Does not touch the existing A2C2f.
+    """
+    def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False,
+                 mlp_ratio=2.0, e=0.5, g=1, shortcut=True,
+                 local_area=1, eca_k=3):
+        super().__init__()
+        if not isinstance(e, (int, float)):
+            e = 0.5
+        c_ = int(c2 * e)
+        assert c_ % 32 == 0, "Dimension of ABlock be a multiple of 32."
+        num_heads = c_ // 32
+
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv((1 + n) * c_, c2, 1)
+
+        init_values = 0.01
+        self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if a2 and residual else None
+
+        # NOTE: area param existing kamu tetap ada, tapi untuk dual attention kita pakai local_area + eca_k
+        self.m = nn.ModuleList(
+            nn.Sequential(*(ABlockDual(c_, num_heads, mlp_ratio, local_area=local_area, eca_k=eca_k) for _ in range(2)))
+            if a2 else C3k(c_, c_, 2, shortcut, g)
+            for _ in range(n)
+        )
+
+    def forward(self, x):
+        y = [self.cv1(x)]
+        y.extend(m(y[-1]) for m in self.m)
+        out = self.cv2(torch.cat(y, 1))
+        if self.gamma is not None:
+            return x + self.gamma.view(1, -1, 1, 1) * out
+        return out
 
 class A2C2f(nn.Module):  
     """
@@ -1902,10 +1999,21 @@ class DualAttention(nn.Module):
         local_feat = self.local_channel_attn(local_feat)
         
         # Fusion: concatenate global and local features
-        fused = torch.cat([global_feat, local_feat], dim=1)  # [B, 2*C, H, W]
-        fused = self.fusion_conv(fused)  # [B, C, H, W]
+        fused = torch.cat([global_feat, local_feat], dim=1)  # [B, 2*dim, H, W]
+        # Verify fusion input channels
+        if fused.shape[1] != dim * 2:
+            raise RuntimeError(
+                f"DualAttention fusion mismatch: concatenated features have {fused.shape[1]} channels, "
+                f"but fusion_conv expects {dim * 2} channels (got {self.fusion_conv.conv.in_channels})"
+            )
+        fused = self.fusion_conv(fused)  # [B, dim, H, W]
         
-        # Residual connection
+        # Residual connection - ensure channel match
+        if identity.shape[1] != fused.shape[1]:
+            raise RuntimeError(
+                f"DualAttention residual mismatch: identity has {identity.shape[1]} channels, "
+                f"but fused has {fused.shape[1]} channels"
+            )
         return identity + fused
 
 

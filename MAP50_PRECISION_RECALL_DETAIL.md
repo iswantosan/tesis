@@ -494,3 +494,4 @@ FN naik → Recall turun → PR curve tidak mencapai recall tinggi → AP turun 
 
 
 
+
