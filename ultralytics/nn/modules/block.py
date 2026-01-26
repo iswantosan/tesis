@@ -818,6 +818,14 @@ class C3k2Attn(C3k2):
     
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, attn_type='eca'):
         """Initialize C3k2Attn with attention mechanism."""
+        # Ensure all numeric parameters are properly typed
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        c3k = bool(c3k) if isinstance(c3k, (int, float, str)) else c3k
+        e = float(e) if not isinstance(e, bool) else e
+        g = int(g) if not isinstance(g, bool) else g  # groups must be int
+        shortcut = bool(shortcut) if isinstance(shortcut, (int, float, str)) else shortcut
         super().__init__(c1, c2, n, c3k, e, g, shortcut)
         # Hardcode ECA attention
         self.attn = LightAttention(c2, c2, attn_type='eca')

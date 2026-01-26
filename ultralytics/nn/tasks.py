@@ -1191,10 +1191,22 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m is C3k2Attn:  # C3k2Attn - hardcode ECA, ignore attn_type parameter
                 legacy = False
                 # Remove any string attn_type parameter (hardcoded to 'eca' in class)
-                if len(args) > 0 and isinstance(args[-1], str):
+                if len(args) > 0 and isinstance(args[-1], str) and args[-1] not in ['True', 'False', 'true', 'false']:
                     args = args[:-1]  # Remove string attn_type
-                # Always append 'eca' (hardcoded, but kept for signature compatibility)
-                args.append('eca')
+                # Ensure all numeric args are properly converted after insert(2, n)
+                # args format: [c1, c2, n, c3k, e, g, shortcut, ...]
+                # After insert, we need to ensure g (groups) is int
+                if len(args) > 5:  # g is at index 5 after insert(2, n)
+                    try:
+                        args[5] = int(args[5])  # g (groups) must be int
+                    except (ValueError, TypeError):
+                        args[5] = 1  # default to 1 if conversion fails
+                # Ensure e (expansion) is float
+                if len(args) > 4:
+                    try:
+                        args[4] = float(args[4])  # e (expansion) must be float
+                    except (ValueError, TypeError):
+                        args[4] = 0.5  # default to 0.5 if conversion fails
             if m is A2C2f: 
                 legacy = False
                 if scale and scale in "lx":  # for L/X sizes
