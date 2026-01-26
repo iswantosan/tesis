@@ -414,9 +414,17 @@ class DetectionModel(BaseModel):
 
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
-        if nc and nc != self.yaml["nc"]:
-            LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
-            self.yaml["nc"] = nc  # override YAML value
+        # Ensure nc is set - use parameter if provided, otherwise YAML value, otherwise default to 80
+        yaml_nc = self.yaml.get("nc", None)
+        if nc is not None:
+            if yaml_nc is not None and nc != yaml_nc:
+                LOGGER.info(f"Overriding model.yaml nc={yaml_nc} with nc={nc}")
+            self.yaml["nc"] = nc  # override YAML value with parameter
+        elif yaml_nc is None:
+            # Neither parameter nor YAML has nc, default to 80
+            LOGGER.warning("WARNING ⚠️ 'nc' not found in YAML and not provided as parameter. Defaulting to nc=80.")
+            self.yaml["nc"] = 80
+        # At this point, self.yaml["nc"] is guaranteed to exist
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
