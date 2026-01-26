@@ -1847,8 +1847,8 @@ class A2C2f(nn.Module):
 
     def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=2.0, e=0.5, g=1, shortcut=True):
         super().__init__()
-        # Hardcode e to 0.5 if invalid (e.g., string like 'eca' was passed)
-        if not isinstance(e, (int, float)):
+        # Hardcode e to 0.5 if invalid (e.g., string like 'eca' was passed, or -1 placeholder)
+        if not isinstance(e, (int, float)) or e == -1:
             e = 0.5  # Default expansion ratio
         c_ = int(c2 * e)  # hidden channels
         assert c_ % 32 == 0, "Dimension of ABlock be a multiple of 32."
@@ -2056,11 +2056,11 @@ class A2C2fDA(nn.Module):
     def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=1.2, e=0.5, g=1, shortcut=True):
         """Initialize A2C2fDA with DualAttention."""
         super().__init__()
-        # Hardcode e to 0.5 if invalid
-        if not isinstance(e, (int, float)):
+        # Hardcode e to 0.5 if invalid (e.g., string or -1 placeholder)
+        if not isinstance(e, (int, float)) or e == -1:
             e = 0.5
         # Ensure e is a valid number
-        e = float(e) if isinstance(e, (int, float)) else 0.5
+        e = float(e) if isinstance(e, (int, float)) and e != -1 else 0.5
         c_ = int(c2 * e)  # hidden channels
         # Make sure c_ is divisible by 32 and at least 32
         if c_ % 32 != 0:
