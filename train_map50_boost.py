@@ -86,3 +86,9 @@ print(f"Recall: {results.results_dict.get('metrics/recall(B)', 'N/A')}")
 
 print("\n✅ Training selesai! Check results di runs/detect/yolov12_map50_boost/")
 
+
+
+
+
+
+

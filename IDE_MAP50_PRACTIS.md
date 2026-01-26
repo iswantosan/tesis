@@ -406,3 +406,9 @@ results = model.predict(source='test/', augment=True)
 
 **Good luck! Semoga ada ide yang belum dicoba dan berhasil! 🚀📈**
 
+
+
+
+
+
+

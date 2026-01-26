@@ -1,4 +1,4 @@
-# YOLOv12-ASSN 🚀, AGPL-3.0 license
+# VVV YOLOv12-ASSN 🚀, AGPL-3.0 license
 # YOLOv12 with ASSN (Attention-based Scale Sequence Network) in Neck
 # ASSN uses Channel Attention, Spatial Attention, and E-ELAN for feature refinement
 # For Usage examples see https://docs.ultralytics.com/tasks/detect
@@ -40,7 +40,7 @@ head:
 
   # ASSN: Attention-based Scale Sequence Network
   # Takes [P5, P4, P3A] and produces refined P3B
-  - [[8, 11, 14], 1, ASSN, [1024, 512, 256, 256]] # 15 ASSN: P3B refined with attention
+  - [[8, 11, 14], 2, ASSN, [1024, 512, 256, 256]] # 15 ASSN: P3B refined with attention
 
   # Bottom-up path: P3 → P4 → P5
   - [-1, 1, Conv, [256, 3, 2]] # 16

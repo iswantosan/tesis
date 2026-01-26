@@ -4504,6 +4504,11 @@ class CSFR(nn.Module):
         # P3 → P4
         p3_sent = self.p3_to_p4(p3)
         
+        # Downsample p3_sent to match p4 spatial dimensions
+        _, _, h4, w4 = p4.shape
+        if p3_sent.shape[2:] != (h4, w4):
+            p3_sent = F.interpolate(p3_sent, size=(h4, w4), mode='bilinear', align_corners=False)
+        
         # P4 process (add P3 info)
         p4_enhanced = self.p4_process(p4 + p3_sent)
         

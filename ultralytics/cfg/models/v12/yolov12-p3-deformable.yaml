@@ -1,4 +1,4 @@
-# YOLOv12-P3P4-Deformable 🚀, AGPL-3.0 license
+# X YOLOv12-P3P4-Deformable 🚀, AGPL-3.0 license
 # YOLOv12 with Deformable Detection Head for P3 and P4 enhancement
 # Adaptive geometric transformation for better small object detection
 # For Usage examples see https://docs.ultralytics.com/tasks/detect
@@ -7,7 +7,7 @@
 nc: 1 # number of classes
 scales: # model compound scaling constants
   # [depth, width, max_channels]
-  n: [0.50, 0.25, 1024]
+  n: [0.50, 0.25, 1024] 
   s: [0.50, 0.50, 1024]
   m: [0.50, 1.00, 512]
   l: [1.00, 1.00, 512]

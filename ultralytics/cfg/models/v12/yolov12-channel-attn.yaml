@@ -1,4 +1,4 @@
-# YOLOv12-ChannelAttention 🚀, AGPL-3.0 license
+# X YOLOv12-ChannelAttention 🚀, AGPL-3.0 license
 # YOLOv12 with Channel Attention in neck/head for enhanced feature refinement
 # Targeting >87.1% accuracy with strategic attention placement
 # For Usage examples see https://docs.ultralytics.com/tasks/detect
@@ -50,6 +50,12 @@ head:
   - [-1, 1, ChannelAttention, [1024]] # 24 Channel Attention: Refine P5 features
 
   - [[16, 20, 24], 1, Detect, [nc]] # Detect(P3, P4, P5)
+
+
+
+
+
+
 
 
 

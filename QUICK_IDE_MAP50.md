@@ -274,3 +274,9 @@ model.train(
 
 **Good luck! Semoga ada ide yang belum dicoba dan berhasil! 🚀📈**
 
+
+
+
+
+
+
