@@ -34,6 +34,9 @@ class Detect(nn.Module):
     def __init__(self, nc=80, ch=()):
         """Initializes the YOLO detection layer with specified number of classes and channels."""
         super().__init__()
+        # Ensure nc is not None - default to 80 if not provided
+        if nc is None:
+            nc = 80
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
