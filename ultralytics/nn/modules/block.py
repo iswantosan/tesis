@@ -1624,6 +1624,7 @@ class AAttn(nn.Module):
         """Processes the input tensor 'x' through the area-attention"""
         B, C, H, W = x.shape
         N = H * W
+        all_head_dim = self.head_dim * self.num_heads
 
         qk = self.qk(x).flatten(2).transpose(1, 2)
         v = self.v(x)
@@ -1631,10 +1632,10 @@ class AAttn(nn.Module):
         v = v.flatten(2).transpose(1, 2)
 
         if self.area > 1:
-            qk = qk.reshape(B * self.area, N // self.area, C * 2)
-            v = v.reshape(B * self.area, N // self.area, C)
+            qk = qk.reshape(B * self.area, N // self.area, all_head_dim * 2)
+            v = v.reshape(B * self.area, N // self.area, all_head_dim)
             B, N, _ = qk.shape
-        q, k = qk.split([C, C], dim=2)
+        q, k = qk.split([all_head_dim, all_head_dim], dim=2)
 
         if x.is_cuda and USE_FLASH_ATTN:
             q = q.view(B, N, self.num_heads, self.head_dim)
@@ -1660,9 +1661,9 @@ class AAttn(nn.Module):
             x = x.permute(0, 3, 1, 2)
 
         if self.area > 1:
-            x = x.reshape(B // self.area, N * self.area, C)
+            x = x.reshape(B // self.area, N * self.area, all_head_dim)
             B, N, _ = x.shape
-        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)
+        x = x.reshape(B, H, W, all_head_dim).permute(0, 3, 1, 2)
 
         return self.proj(x + pp)
     
@@ -4503,11 +4504,6 @@ class CSFR(nn.Module):
         
         # P3 → P4
         p3_sent = self.p3_to_p4(p3)
-        
-        # Downsample p3_sent to match p4 spatial dimensions
-        _, _, h4, w4 = p4.shape
-        if p3_sent.shape[2:] != (h4, w4):
-            p3_sent = F.interpolate(p3_sent, size=(h4, w4), mode='bilinear', align_corners=False)
         
         # P4 process (add P3 info)
         p4_enhanced = self.p4_process(p4 + p3_sent)
