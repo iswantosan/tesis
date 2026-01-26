@@ -1185,8 +1185,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
             if m is C3k2:  # for M/L/X sizes
                 legacy = False
-                if scale and scale in "mlx":
-                    args[3] = True
+                if scale is not None and scale in "mlx":
+                    if len(args) > 3:
+                        args[3] = True
             if m is C3k2Attn:  # C3k2Attn - hardcode ECA, ignore attn_type parameter
                 legacy = False
                 # Remove any string attn_type parameter (hardcoded to 'eca' in class)
@@ -1309,12 +1310,14 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             # Args: [c_out] where c_out is output channels
             # Input channels are auto-inferred from f (list of 2 layer indices)
             if isinstance(f, (list, tuple)) and len(f) == 2:
-                c_p5 = ch[f[0]]  # P5 channels (upsampled)
-                c_p4 = ch[f[1]]  # P4 channels
+                c_p4 = ch[f[1]]  # P4 channels (target for alignment)
                 c_out = args[0] if args else c_p4  # Output channels (default: P4 channels)
                 if c_out != nc:
                     c_out = make_divisible(min(c_out, max_channels) * width, 8)
-                args = [c_p4, c_out]  # AFF takes (c1=P4, c2=output)
+                # Ensure integers
+                c_p4 = int(c_p4)
+                c_out = int(c_out)
+                args = [c_p4, c_out]  # AFF takes (c1=P4_channels, c2=output_channels)
             else:
                 raise ValueError(f"AdaptiveFeatureFusion expects list of 2 layer indices in 'from', got {f}")
         elif m is PANPlus:

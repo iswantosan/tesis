@@ -6308,13 +6308,23 @@ class AdaptiveFeatureFusion(nn.Module):
     
     Args:
         c1 (int): P4 input channels (auto-inferred)
-        c2 (int): Output channels
+        c2 (int): P5 input channels (auto-inferred)
+        c3 (int): Output channels
     """
     
     def __init__(self, c1, c2):
-        """Initialize AdaptiveFeatureFusion for learnable feature fusion."""
+        """Initialize AdaptiveFeatureFusion for learnable feature fusion.
+        
+        Args:
+            c1 (int): P4 input channels (target channels for alignment)
+            c2 (int): Output channels
+        """
         super().__init__()
         from .conv import Conv
+        
+        # Ensure integers
+        c1 = int(c1)
+        c2 = int(c2)
         
         # Learnable fusion weight
         self.weight_p4 = nn.Parameter(torch.ones(1))
@@ -6323,7 +6333,11 @@ class AdaptiveFeatureFusion(nn.Module):
         # Upsampling untuk P5
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
         
-        # Fusion conv
+        # Channel alignment will be created dynamically in forward pass
+        # Store target channels (P4 channels)
+        self.c1 = c1
+        
+        # Fusion conv (input will be aligned to c1 channels)
         self.fusion_conv = nn.Sequential(
             Conv(c1, c2, 1),
             Conv(c2, c2, 3)
@@ -6331,11 +6345,14 @@ class AdaptiveFeatureFusion(nn.Module):
         
         # Local context extractor
         self.context = nn.Sequential(
-            nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
-            nn.BatchNorm2d(c2),
+            nn.Conv2d(int(c2), int(c2), 3, padding=1, groups=int(c2)),
+            nn.BatchNorm2d(int(c2)),
             nn.SiLU(inplace=True),
-            nn.Conv2d(c2, c2, 1),
+            nn.Conv2d(int(c2), int(c2), 1),
         )
+        
+        # Alignment layer (will be created on first forward pass)
+        self.align_p5 = None
     
     def forward(self, x):
         """
@@ -6353,14 +6370,33 @@ class AdaptiveFeatureFusion(nn.Module):
         else:
             raise ValueError(f"AdaptiveFeatureFusion expects list of 2 tensors [P5, P4], got {type(x)}")
         
+        # Get channel and spatial dimensions
+        _, c_p4, h4, w4 = p4.shape
+        _, c_p5 = p5.shape[:2]
+        
+        # Ensure channels are integers
+        c_p4 = int(c_p4)
+        c_p5 = int(c_p5)
+        
+        # Align P5 channels to P4 channels if different
+        if c_p5 != c_p4:
+            if self.align_p5 is None or self.align_p5 is not None and not isinstance(self.align_p5, nn.Identity):
+                # Check if existing align_p5 has correct channels
+                if self.align_p5 is None or (hasattr(self.align_p5, 'conv') and self.align_p5.conv.in_channels != c_p5):
+                    from .conv import Conv
+                    self.align_p5 = Conv(c_p5, c_p4, k=1, s=1, act=True).to(p5.device)
+                    self.add_module('align_p5', self.align_p5)
+            p5 = self.align_p5(p5)
+        elif self.align_p5 is None:
+            self.align_p5 = nn.Identity()
+        
         # Upsample P5 ke size P4 (if not already upsampled)
-        _, _, h4, w4 = p4.shape
         if p5.shape[2:] != (h4, w4):
             p5_up = self.upsample(p5)
         else:
             p5_up = p5
         
-        # Adaptive weighted fusion
+        # Adaptive weighted fusion (now both have same channels)
         w_sum = self.weight_p4 + self.weight_p5 + 1e-4
         fused = (self.weight_p4 * p4 + self.weight_p5 * p5_up) / w_sum
         
