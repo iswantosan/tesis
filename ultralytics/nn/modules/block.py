@@ -43,6 +43,7 @@ __all__ = (
     "CBLinear",
     "C3k2",
     "C3k2Attn",
+    "C3k2AttnV2",
     "C2fPSA",
     "C2PSA",
     "RepVGGDW",
@@ -838,6 +839,70 @@ class C3k2Attn(C3k2):
         out = self.cv2(torch.cat(y, 1))
         # Apply attention
         out = self.attn(out)
+        return out
+
+
+class C3k2AttnV2(C3k2):
+    """
+    C3k2 module with enhanced dual attention mechanism (V2).
+    
+    Improved version of C3k2Attn with:
+    - Dual attention: ECA (channel) + CoordinateAttention (spatial-channel)
+    - Pre-attention on input features for better feature selection
+    - Post-attention on output features for refinement
+    - Better feature extraction and representation learning
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of bottleneck blocks (default: 1)
+        c3k (bool): Whether to use C3k blocks instead of Bottleneck (default: False)
+        e (float): Expansion ratio (default: 0.5)
+        g (int): Groups for convolution (default: 1)
+        shortcut (bool): Use shortcut connection (default: True)
+        use_pre_attn (bool): Use pre-attention on input (default: True)
+    """
+    
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, use_pre_attn=True):
+        """Initialize C3k2AttnV2 with enhanced dual attention mechanism."""
+        # Ensure all numeric parameters are properly typed
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        c3k = bool(c3k) if isinstance(c3k, (int, float, str)) else c3k
+        e = float(e) if not isinstance(e, bool) else e
+        g = int(g) if not isinstance(g, bool) else g  # groups must be int
+        shortcut = bool(shortcut) if isinstance(shortcut, (int, float, str)) else shortcut
+        use_pre_attn = bool(use_pre_attn) if isinstance(use_pre_attn, (int, float, str)) else use_pre_attn
+        
+        super().__init__(c1, c2, n, c3k, e, g, shortcut)
+        
+        # Pre-attention: ECA for input feature selection
+        self.use_pre_attn = use_pre_attn
+        if use_pre_attn:
+            self.pre_attn = ECA(c1, c1)
+        
+        # Dual attention: ECA (channel) + CoordinateAttention (spatial-channel)
+        self.attn_eca = ECA(c2, c2)
+        self.attn_coord = CoordinateAttention(c2, c2)
+    
+    def forward(self, x):
+        """Forward pass through C3k2 with enhanced dual attention."""
+        # Pre-attention on input (optional, for better feature selection)
+        if self.use_pre_attn:
+            x = self.pre_attn(x)
+        
+        # First pass through C3k2
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        out = self.cv2(torch.cat(y, 1))
+        
+        # Dual attention: ECA + CoordinateAttention
+        # Apply ECA for channel attention
+        out = self.attn_eca(out)
+        # Apply CoordinateAttention for spatial-channel attention
+        out = self.attn_coord(out)
+        
         return out
 
 
