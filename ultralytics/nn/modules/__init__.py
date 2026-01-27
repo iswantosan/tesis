@@ -43,6 +43,7 @@ from .block import (
     C3Ghost,
     C3k2,
     C3k2Attn,
+    C3k2AttnV2,
     C3x,
     CBFuse,
     CBLinear,

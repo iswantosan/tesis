@@ -38,6 +38,7 @@ from ultralytics.nn.modules import (
     SpatialAttention,
     C3k2,
     C3k2Attn,
+    C3k2AttnV2,
     C3x,
     CBFuse,
     CBLinear,
@@ -1102,6 +1103,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2f,
             C3k2,
             C3k2Attn,
+            C3k2AttnV2,
             RepNCSPELAN4,
             ELAN1,
             ADown,
@@ -1168,6 +1170,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2f,
                 C3k2,
                 C3k2Attn,
+                C3k2AttnV2,
                 C3_EMA,
                 C2fAttn,
                 C3,
@@ -1195,6 +1198,25 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                     args = args[:-1]  # Remove string attn_type
                 # Ensure all numeric args are properly converted after insert(2, n)
                 # args format: [c1, c2, n, c3k, e, g, shortcut, ...]
+                # After insert, we need to ensure g (groups) is int
+                if len(args) > 5:  # g is at index 5 after insert(2, n)
+                    try:
+                        args[5] = int(args[5])  # g (groups) must be int
+                    except (ValueError, TypeError):
+                        args[5] = 1  # default to 1 if conversion fails
+                # Ensure e (expansion) is float
+                if len(args) > 4:
+                    try:
+                        args[4] = float(args[4])  # e (expansion) must be float
+                    except (ValueError, TypeError):
+                        args[4] = 0.5  # default to 0.5 if conversion fails
+            if m is C3k2AttnV2:  # C3k2AttnV2 - dual attention (ECA + CoordinateAttention)
+                legacy = False
+                # Remove any string parameters that might be passed
+                if len(args) > 0 and isinstance(args[-1], str) and args[-1] not in ['True', 'False', 'true', 'false']:
+                    args = args[:-1]  # Remove string parameter
+                # Ensure all numeric args are properly converted after insert(2, n)
+                # args format: [c1, c2, n, c3k, e, g, shortcut, use_pre_attn]
                 # After insert, we need to ensure g (groups) is int
                 if len(args) > 5:  # g is at index 5 after insert(2, n)
                     try:
