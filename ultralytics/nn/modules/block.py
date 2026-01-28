@@ -108,6 +108,8 @@ __all__ = (
     "DualAttn",
     "ABlockDual",
     "A2C2fDual",
+    "MPSA",
+    "A2C2fMPSA",
 )
 
 
@@ -2193,6 +2195,225 @@ class A2C2fDA(nn.Module):
                 f"A2C2fDA channel mismatch: concatenated features have {y_cat.shape[1]} channels, "
                 f"but expected {expected_channels} channels (cv2 expects {self.cv2.conv.in_channels})"
             )
+        out = self.cv2(y_cat)  # [B, c2, H, W]
+        if self.gamma is not None:
+            # Residual connection: x must have same channels as out (c2)
+            if x.shape[1] != out.shape[1]:
+                # If channel mismatch, skip residual or use projection
+                return out
+            return x + self.gamma.view(1, -1, 1, 1) * out
+        return out
+
+
+class MPSA(nn.Module):
+    """
+    Multi-scale Pooling and Spatial Attention (MPSA) Module.
+    
+    Combines multi-scale convolutions and three types of global pooling 
+    (average, max, and median pooling) to enhance feature extraction capabilities,
+    particularly effective for small object detection.
+    
+    Architecture:
+    1. Channel Attention: AvgPool + MaxPool + MedianPool → Shared MLP → Element-wise addition → Sigmoid
+    2. Spatial Attention: 5x5 depthwise conv → Multi-scale depthwise convs → Element-wise addition → 1x1 conv → Sigmoid
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels (default: same as input)
+        reduction (int): Reduction ratio for MLP in channel attention (default: 16)
+    """
+    
+    def __init__(self, c1, c2=None, reduction=16):
+        """Initialize MPSA module."""
+        super().__init__()
+        c2 = c2 or c1
+        c1 = int(c1)
+        c2 = int(c2)
+        reduction = int(reduction)
+        
+        # Channel Attention components
+        # Three types of global pooling
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # Global median pooling will be computed in forward pass
+        
+        # Shared MLP for channel attention
+        hidden_dim = max(c1 // reduction, 1)
+        self.shared_mlp = nn.Sequential(
+            nn.Linear(c1, hidden_dim, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, c1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+        
+        # Spatial Attention components
+        # Initial 5x5 depthwise convolution
+        self.dw_conv_base = nn.Conv2d(c1, c1, kernel_size=5, stride=1, padding=2, groups=c1, bias=False)
+        
+        # Multi-scale depthwise convolutions
+        # Horizontal: 1x11, 1x7, 1x21
+        # Vertical: 11x1, 7x1, 21x1
+        self.dw_convs = nn.ModuleList([
+            # Horizontal convolutions
+            nn.Conv2d(c1, c1, kernel_size=(1, 11), stride=1, padding=(0, 5), groups=c1, bias=False),
+            nn.Conv2d(c1, c1, kernel_size=(1, 7), stride=1, padding=(0, 3), groups=c1, bias=False),
+            nn.Conv2d(c1, c1, kernel_size=(1, 21), stride=1, padding=(0, 10), groups=c1, bias=False),
+            # Vertical convolutions
+            nn.Conv2d(c1, c1, kernel_size=(11, 1), stride=1, padding=(5, 0), groups=c1, bias=False),
+            nn.Conv2d(c1, c1, kernel_size=(7, 1), stride=1, padding=(3, 0), groups=c1, bias=False),
+            nn.Conv2d(c1, c1, kernel_size=(21, 1), stride=1, padding=(10, 0), groups=c1, bias=False),
+        ])
+        
+        # Final 1x1 convolution for spatial attention
+        self.spatial_conv = nn.Conv2d(c1, 1, kernel_size=1, stride=1, bias=False)
+        
+        # Output projection (if c1 != c2)
+        if c1 != c2:
+            self.output_conv = Conv(c1, c2, k=1, s=1)
+        else:
+            self.output_conv = None
+    
+    def forward(self, x):
+        """
+        Forward pass through MPSA.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+        
+        Returns:
+            Enhanced features with MPSA attention [B, C2, H, W]
+        """
+        identity = x
+        B, C, H, W = x.shape
+        
+        # ========== Channel Attention ==========
+        # Global average pooling
+        avg_out = self.avg_pool(x).view(B, C)  # [B, C]
+        
+        # Global max pooling
+        max_out = self.max_pool(x).view(B, C)  # [B, C]
+        
+        # Global median pooling
+        # Compute median across spatial dimensions (H, W)
+        x_flat = x.view(B, C, -1)  # [B, C, H*W]
+        median_out = torch.median(x_flat, dim=2)[0]  # [B, C]
+        
+        # Process through shared MLP
+        avg_out = self.shared_mlp(avg_out)  # [B, C]
+        max_out = self.shared_mlp(max_out)  # [B, C]
+        median_out = self.shared_mlp(median_out)  # [B, C]
+        
+        # Element-wise addition and sigmoid
+        channel_attn = self.sigmoid(avg_out + max_out + median_out)  # [B, C]
+        channel_attn = channel_attn.view(B, C, 1, 1)  # [B, C, 1, 1]
+        
+        # Apply channel attention
+        x_channel = identity * channel_attn  # [B, C, H, W]
+        
+        # ========== Spatial Attention ==========
+        # Initial 5x5 depthwise convolution
+        x_spatial = self.dw_conv_base(x_channel)  # [B, C, H, W]
+        
+        # Multi-scale depthwise convolutions
+        spatial_features = [x_spatial]  # Start with base feature
+        for dw_conv in self.dw_convs:
+            spatial_features.append(dw_conv(x_channel))  # [B, C, H, W]
+        
+        # Element-wise addition of all spatial features
+        fused_spatial = sum(spatial_features)  # [B, C, H, W]
+        
+        # Final 1x1 convolution to generate spatial attention map
+        spatial_attn = self.sigmoid(self.spatial_conv(fused_spatial))  # [B, 1, H, W]
+        
+        # Apply spatial attention
+        out = x_channel * spatial_attn  # [B, C, H, W]
+        
+        # Output projection if needed
+        if self.output_conv is not None:
+            out = self.output_conv(out)
+        
+        return out
+
+
+class A2C2fMPSA(nn.Module):
+    """
+    A2C2f module with MPSA (Multi-scale Pooling and Spatial Attention) mechanism.
+    
+    Extends A2C2f by incorporating MPSA attention for enhanced small object detection.
+    Compatible with A2C2f signature for YAML parsing.
+    
+    Attributes:
+        c1 (int): Number of input channels
+        c2 (int): Number of output channels
+        n (int): Number of MPSA modules to stack (default: 1)
+        a2 (bool): Whether to use MPSA (default: True, kept for compatibility)
+        area (int): Area parameter (ignored, kept for compatibility with A2C2f signature)
+        residual (bool): Whether to use residual connection (default: False)
+        mlp_ratio (float): MLP expansion ratio (ignored, kept for compatibility)
+        e (float): Expansion ratio (default: 0.5)
+        g (int): Number of groups for grouped convolution (default: 1)
+        shortcut (bool): Whether to use shortcut connection (default: True)
+    
+    Methods:
+        forward: Performs a forward pass through the A2C2fMPSA module.
+    
+    Examples:
+        >>> import torch
+        >>> from ultralytics.nn.modules import A2C2fMPSA
+        >>> model = A2C2fMPSA(c1=512, c2=512, n=4, e=0.5)
+        >>> x = torch.randn(2, 512, 32, 32)
+        >>> output = model(x)
+        >>> print(output.shape)
+    """
+    
+    def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=1.2, e=0.5, g=1, shortcut=True):
+        """Initialize A2C2fMPSA with MPSA attention."""
+        super().__init__()
+        # Hardcode e to 0.5 if invalid (e.g., string or -1 placeholder)
+        if not isinstance(e, (int, float)) or e == -1:
+            e = 0.5
+        # Ensure e is a valid number
+        e = float(e) if isinstance(e, (int, float)) and e != -1 else 0.5
+        c_ = int(c2 * e)  # hidden channels
+        
+        # Ensure all channel values are integers
+        c1 = int(c1)
+        c2 = int(c2)
+        c_ = int(c_)
+        n = int(n)
+        
+        # Calculate output channels for cv2
+        cv2_in_channels = int((1 + n) * c_)
+        cv2_out_channels = int(c2)
+        
+        self.cv1 = Conv(c1, c_, k=1, s=1)
+        self.cv2 = Conv(cv2_in_channels, cv2_out_channels, k=1, s=1)
+        
+        # Use MPSA instead of ABlock
+        # a2 parameter is kept for compatibility but always uses MPSA
+        if a2:
+            self.m = nn.ModuleList(
+                MPSA(c_, c_) for _ in range(n)
+            )
+        else:
+            # Fallback to C3k if a2=False (for compatibility)
+            from .block import C3k
+            self.m = nn.ModuleList(
+                C3k(c_, c_, 2, shortcut, g) for _ in range(n)
+            )
+        
+        # Residual connection with layer scale (if enabled)
+        init_values = 0.01
+        self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if residual else None
+    
+    def forward(self, x):
+        """Forward pass through A2C2fMPSA layer."""
+        y = [self.cv1(x)]  # First feature: [B, c_, H, W]
+        # Process through each MPSA module
+        for m in self.m:
+            y.append(m(y[-1]))  # Each outputs [B, c_, H, W]
+        # Concatenate all features along channel dimension
+        y_cat = torch.cat(y, dim=1)  # [B, (1+n)*c_, H, W]
         out = self.cv2(y_cat)  # [B, c2, H, W]
         if self.gamma is not None:
             # Residual connection: x must have same channels as out (c2)
