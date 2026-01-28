@@ -1082,12 +1082,12 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 try:
                     m = getattr(nn_modules, m)
                 except AttributeError:
-                    # Try importing from block directly
-                    from ultralytics.nn.modules.block import MPSA, A2C2fMPSA
+                    # Try importing from block directly (use different variable names to avoid UnboundLocalError)
+                    from ultralytics.nn.modules.block import MPSA as MPSA_block, A2C2fMPSA as A2C2fMPSA_block
                     if m == 'MPSA':
-                        m = MPSA
+                        m = MPSA_block
                     elif m == 'A2C2fMPSA':
-                        m = A2C2fMPSA
+                        m = A2C2fMPSA_block
                     else:
                         raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
         for j, a in enumerate(args):
