@@ -62,6 +62,8 @@ from .block import (
     A2C2f,
     A2C2fDA,
     A2C2fDual,
+    MPSA,
+    A2C2fMPSA,
     DualAttn,
     ABlockDual,
     DualAttention,
@@ -268,6 +270,8 @@ __all__ = (
     "A2C2f",
     "A2C2fDA",
     "A2C2fDual",
+    "MPSA",
+    "A2C2fMPSA",
     "DualAttn",
     "ABlockDual",
     "DualAttention",
@@ -361,4 +365,17 @@ __all__ = (
     "MEAP",
     "AEAP",
     "Involution",
+    "MPSA",
+    "A2C2fMPSA",
 )
+
+# Explicit import to ensure MPSA and A2C2fMPSA are available
+try:
+    from .block import MPSA, A2C2fMPSA
+except ImportError:
+    # If import fails, try to import directly
+    import sys
+    import importlib
+    block_module = importlib.import_module('ultralytics.nn.modules.block')
+    MPSA = getattr(block_module, 'MPSA', None)
+    A2C2fMPSA = getattr(block_module, 'A2C2fMPSA', None)
