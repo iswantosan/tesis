@@ -22,9 +22,8 @@ backbone:
   - [-1, 2, C3k2,  [256, False, 0.25]]
   - [-1, 1, MPSA,  [256]] # 2 MPSA: Multi-scale pooling and spatial attention di P2
   - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 3-P3/8
-  - [-1, 2, C3k2Attn,  [512, False, 0.25]]
-  - [-1, 1, MPSA,  [512]] # 5 MPSA: Enhanced attention di P3
-  - [-1, 1, Conv,  [512, 3, 2]] # 6-P4/16
+  - [-1, 2, C3k2,  [512, False, 0.25]]
+  - [-1, 1, Conv,  [512, 3, 2]] # 5-P4/16
   - [-1, 4, A2C2f,  [512, True, 4]] # 7
   - [-1, 1, MPSA,  [512]] # 8 MPSA: Enhanced attention di P4
   - [-1, 1, Conv,  [1024, 3, 2]] # 9-P5/32
@@ -50,8 +49,7 @@ head:
 
   - [-1, 1, Conv, [512, 3, 2]]
   - [[-1, 10], 1, Concat, [1]] # cat head P5
-  - [-1, 2, C3k2Attn, [1024, True]] # 26 (P5/32-large)
-  - [-1, 1, MPSA,  [1024]] # 27 MPSA: Enhanced attention di P5 bottom-up
+  - [-1, 2, C3k2, [1024, True]] # 26 (P5/32-large)
 
   - [[18, 22, 26], 1, Detect, [nc]] # Detect(P3, P4, P5) dengan MPSA-enhanced features
 

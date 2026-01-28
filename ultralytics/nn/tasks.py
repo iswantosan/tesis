@@ -83,6 +83,8 @@ from ultralytics.nn.modules import (
     A2C2f,
     A2C2fDA,
     A2C2fDual,
+    MPSA,
+    A2C2fMPSA,
     SmallObjectBlock,
     RFCBAM,
     DySample,
@@ -1077,7 +1079,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             except KeyError:
                 # Fallback: import directly from ultralytics.nn.modules
                 from ultralytics.nn import modules as nn_modules
-                m = getattr(nn_modules, m)
+                try:
+                    m = getattr(nn_modules, m)
+                except AttributeError:
+                    # Try importing from block directly
+                    from ultralytics.nn.modules.block import MPSA, A2C2fMPSA
+                    if m == 'MPSA':
+                        m = MPSA
+                    elif m == 'A2C2fMPSA':
+                        m = A2C2fMPSA
+                    else:
+                        raise AttributeError(f"module 'ultralytics.nn.modules' has no attribute '{m}'")
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -1122,6 +1134,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             A2C2f,
             A2C2fDual,
+            A2C2fMPSA,
             SPDConv,
             SPDConv_CA,
             DendriticConv2d,
@@ -1183,6 +1196,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2PSA,
                 A2C2f,
                 A2C2fDA,
+                A2C2fMPSA,
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1237,6 +1251,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m is A2C2fDA:
                 legacy = False
                 # A2C2fDA uses same signature as A2C2f for compatibility
+                # YAML format: [c2, a2, area] -> [c1, c2, n, a2, area, ...]
+                # Default values handled in __init__
+            if m is A2C2fMPSA:
+                legacy = False
+                # A2C2fMPSA uses same signature as A2C2f for compatibility
                 # YAML format: [c2, a2, area] -> [c1, c2, n, a2, area, ...]
                 # Default values handled in __init__
         elif m is AIFI:
