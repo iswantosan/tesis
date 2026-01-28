@@ -1,0 +1,118 @@
+# YOLOv12 dengan C3k2AttnV2 Example 🚀, AGPL-3.0 license
+# Contoh penggunaan C3k2AttnV2 (C3k2 dengan Enhanced Dual Attention)
+# C3k2AttnV2 = C3k2 + Pre-ECA + Post-ECA + CoordinateAttention untuk enhanced feature extraction
+
+# Parameters
+nc: 1 # number of classes
+scales: # model compound scaling constants
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+# YOLO12-turbo backbone dengan C3k2AttnV2
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,  [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv,  [128, 3, 2, 1, 2]] # 1-P2/4
+  - [-1, 2, C3k2AttnV2,  [256, False, 0.25]] # 2 - C3k2AttnV2 dengan dual attention
+  - [-1, 1, Conv,  [256, 3, 2, 1, 4]] # 3-P3/8
+  - [-1, 2, C3k2AttnV2,  [512, False, 0.25]] # 4 - C3k2AttnV2 dengan dual attention
+  - [-1, 1, Conv,  [512, 3, 2]] # 5-P4/16
+  - [-1, 4, A2C2f, [512, True, 4]] # 6
+  - [-1, 1, Conv,  [1024, 3, 2]] # 7-P5/32
+  - [-1, 4, A2C2f, [1024, True, 1]] # 8
+
+# YOLO12-turbo head dengan C3k2AttnV2
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 9
+  - [[-1, 6], 1, Concat, [1]] # 10 cat backbone P4
+  - [-1, 2, A2C2f, [512, False, -1]] # 11
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 12
+  - [[-1, 4], 1, Concat, [1]] # 13 cat backbone P3
+  - [-1, 2, A2C2f, [256, False, -1]] # 14
+
+  - [-1, 1, Conv, [256, 3, 2]] # 15
+  - [[-1, 11], 1, Concat, [1]] # 16 cat head P4
+  - [-1, 2, A2C2f, [512, False, -1]] # 17
+
+  - [-1, 1, Conv, [512, 3, 2]] # 18
+  - [[-1, 8], 1, Concat, [1]] # 19 cat head P5
+  - [-1, 2, C3k2AttnV2, [1024, True]] # 20 - C3k2AttnV2 di P5 (large scale)
+
+  - [[14, 17, 20], 1, Detect, [nc]] # 21 Detect(P3, P4, P5)
+
+# ============================================
+# CARA PAKAI C3k2AttnV2:
+# ============================================
+# 
+# Format di YAML:
+#   - [-1, repeats, C3k2AttnV2, [c2, c3k, e, g, shortcut, use_pre_attn]]
+#
+# Parameter:
+#   - c2 (int): Output channels (required)
+#   - c3k (bool): Use C3k blocks instead of Bottleneck (default: False)
+#   - e (float): Expansion ratio (default: 0.5)
+#   - g (int): Groups for convolution (default: 1)
+#   - shortcut (bool): Use shortcut connection (default: True)
+#   - use_pre_attn (bool): Use pre-attention on input (default: True)
+#
+# Contoh minimal (hanya c2):
+#   - [-1, 2, C3k2AttnV2, [256]]
+#
+# Contoh lengkap:
+#   - [-1, 2, C3k2AttnV2, [256, False, 0.25, 1, True, True]]
+#
+# Contoh tanpa pre-attention:
+#   - [-1, 2, C3k2AttnV2, [256, False, 0.25, 1, True, False]]
+#
+# ============================================
+# PERBEDAAN C3k2Attn vs C3k2AttnV2:
+# ============================================
+# 
+# C3k2Attn (V1):
+#   - Hanya ECA attention setelah C3k2
+#   - Format: [c2, c3k, e]
+#
+# C3k2AttnV2 (Enhanced):
+#   - Pre-attention: ECA pada input (optional)
+#   - Post-attention: ECA + CoordinateAttention pada output
+#   - Dual attention mechanism untuk better feature extraction
+#   - Format: [c2, c3k, e, g, shortcut, use_pre_attn]
+#
+# ============================================
+# CARA TRAIN:
+# ============================================
+# 
+# from ultralytics import YOLO
+# 
+# # Load model dengan C3k2AttnV2
+# model = YOLO('ultralytics/cfg/models/v12/yolov12-c3k2attnv2-example.yaml')
+# 
+# # Train
+# model.train(
+#     data='your_data.yaml',
+#     epochs=200,
+#     imgsz=640,
+#     batch=16
+# )
+#
+# ============================================
+# KEUNTUNGAN C3k2AttnV2:
+# ============================================
+# 
+# 1. Dual Attention: ECA (channel) + CoordinateAttention (spatial-channel)
+# 2. Pre-attention: Feature selection sebelum processing
+# 3. Better feature extraction untuk small objects
+# 4. Enhanced representation learning
+# 5. Backward compatible dengan C3k2Attn format
+#
+# ============================================
+
+
+
+
+
