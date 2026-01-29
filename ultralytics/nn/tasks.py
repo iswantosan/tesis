@@ -1769,6 +1769,14 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             # Hardcode attn_type to 'eca'
             args = [c1, c2, block_type, n, 'eca', mix_k, shortcut]
             # c2 is already set above, will be appended to ch list
+        elif m is MPSA:
+            # MPSA needs (c1, c2=None, reduction=16) where c1 is input channels and c2 is output channels
+            c1 = ch[f]  # Input channels from previous layer
+            c2 = args[0] if args else c1  # Output channels from args (default: same as input)
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            reduction = args[1] if len(args) > 1 else 16  # Reduction ratio (default: 16)
+            args = [c1, c2, reduction]
         else:
             c2 = ch[f]
 
