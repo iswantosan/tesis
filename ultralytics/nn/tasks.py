@@ -1441,6 +1441,22 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args = [c3, c4, c5, c_out]
             else:
                 raise ValueError(f"BiFPN expects list of 3 layer indices in 'from', got {f}")
+        elif m is CrossLevelAttention or (hasattr(m, '__name__') and m.__name__ == 'CrossLevelAttention') or type(m).__name__ == 'CrossLevelAttention':
+            # CrossLevelAttention receives 3 inputs: [P3, P4, P5]
+            # Args: [channels] where channels is the channel dimension (typically same as P3)
+            if isinstance(f, (list, tuple)) and len(f) == 3:
+                c3 = ch[f[0]]  # P3 channels
+                c4 = ch[f[1]]  # P4 channels
+                c5 = ch[f[2]]  # P5 channels
+                # CrossLevelAttention uses single channel arg (typically P3 channels)
+                channels = args[0] if args else c3  # Default to P3 channels
+                if channels != nc:
+                    channels = make_divisible(min(channels, max_channels) * width, 8)
+                args = [channels]
+                # Output channels: same as input (returns list [P3, P4, P5] with same channels)
+                c2 = c3  # Output channel (for ch.append, use P3 channel)
+            else:
+                raise ValueError(f"CrossLevelAttention expects list of 3 layer indices in 'from', got {f}")
         elif m in {FBSB, FBSBE, FBSBMS, FBSBT}:
             # FBSB variants need (c1, c2) where c1 is input channels and c2 is output channels
             c2 = args[0] if args else ch[f]  # Output channels from args, or same as input if not specified
@@ -1778,7 +1794,29 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             reduction = args[1] if len(args) > 1 else 16  # Reduction ratio (default: 16)
             args = [c1, c2, reduction]
         else:
-            c2 = ch[f]
+            # Handle modules that receive multiple inputs (list/tuple in 'from')
+            if isinstance(f, (list, tuple)) and len(f) > 1:
+                # Check if this is CrossLevelAttention by name (more reliable than 'is' comparison)
+                module_name = type(m).__name__ if hasattr(type(m), '__name__') else str(m)
+                if 'CrossLevelAttention' in module_name or (hasattr(m, '__name__') and m.__name__ == 'CrossLevelAttention'):
+                    # CrossLevelAttention receives 3 inputs: [P3, P4, P5]
+                    if len(f) == 3:
+                        c3 = ch[f[0]]  # P3 channels
+                        c4 = ch[f[1]]  # P4 channels
+                        c5 = ch[f[2]]  # P5 channels
+                        channels = args[0] if args else c3  # Default to P3 channels
+                        if channels != nc:
+                            channels = make_divisible(min(channels, max_channels) * width, 8)
+                        args = [channels]
+                        c2 = c3  # Output channel (for ch.append, use P3 channel)
+                    else:
+                        raise ValueError(f"CrossLevelAttention expects list of 3 layer indices in 'from', got {f}")
+                else:
+                    # Generic handling for multi-input modules
+                    # Use first input's channels as default
+                    c2 = ch[f[0]] if isinstance(f[0], int) else ch[f[0][0]] if isinstance(f[0], (list, tuple)) else ch[f]
+            else:
+                c2 = ch[f]
 
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type

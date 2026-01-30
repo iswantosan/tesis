@@ -1096,7 +1096,7 @@ class CrossLevelAttention(nn.Module):
         p4 = p4 + p4_att
         p5 = p5 + p5_att
 
-        return p3, p4, p5
+        return [p3, p4, p5]  # Return list untuk compatibility dengan YAML parser
 
 
 class PANPlus(nn.Module):
