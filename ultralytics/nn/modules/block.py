@@ -1067,12 +1067,9 @@ class CrossLevelAttention(nn.Module):
 
     def __init__(self, channels):
         super().__init__()
-        self.attention_gen = nn.Sequential(
-            Conv(channels * 3, channels, 1),
-            nn.ReLU(),
-            Conv(channels, 3, 1),  # 3 weights untuk P3, P4, P5
-            nn.Softmax(dim=1)
-        )
+        self.channels = channels  # Target channel size (typically P3 channels)
+        # attention_gen akan di-build di forward dengan actual channels
+        self.attention_gen = None
 
     def forward(self, x):
         """
@@ -1090,12 +1087,62 @@ class CrossLevelAttention(nn.Module):
         else:
             raise ValueError(f"CrossLevelAttention expects list of 3 tensors [P3, P4, P5], got {type(x)}")
         
+        # Get actual channels from inputs
+        c3 = p3.shape[1]
+        c4 = p4.shape[1]
+        c5 = p5.shape[1]
+        
+        # Align all channels to target (typically P3 channels)
+        target_c = self.channels
+        if c3 != target_c:
+            if not hasattr(self, 'align_p3') or self.align_p3 is None:
+                self.align_p3 = Conv(c3, target_c, k=1, s=1, act=True).to(p3.device)
+                self.add_module('align_p3', self.align_p3)  # Register as submodule
+            p3 = self.align_p3(p3)
+        else:
+            if not hasattr(self, 'align_p3'):
+                self.align_p3 = nn.Identity()
+                self.add_module('align_p3', self.align_p3)
+        
+        if c4 != target_c:
+            if not hasattr(self, 'align_p4') or self.align_p4 is None:
+                self.align_p4 = Conv(c4, target_c, k=1, s=1, act=True).to(p4.device)
+                self.add_module('align_p4', self.align_p4)  # Register as submodule
+            p4 = self.align_p4(p4)
+        else:
+            if not hasattr(self, 'align_p4'):
+                self.align_p4 = nn.Identity()
+                self.add_module('align_p4', self.align_p4)
+        
+        if c5 != target_c:
+            if not hasattr(self, 'align_p5') or self.align_p5 is None:
+                self.align_p5 = Conv(c5, target_c, k=1, s=1, act=True).to(p5.device)
+                self.add_module('align_p5', self.align_p5)  # Register as submodule
+            p5 = self.align_p5(p5)
+        else:
+            if not hasattr(self, 'align_p5'):
+                self.align_p5 = nn.Identity()
+                self.add_module('align_p5', self.align_p5)
+        
         # Resize semua ke ukuran P4 (middle size)
         p3_resized = F.interpolate(p3, size=p4.shape[-2:], mode='nearest')
         p5_resized = F.interpolate(p5, size=p4.shape[-2:], mode='nearest')
 
-        # Concatenate untuk global context
-        combined = torch.cat([p3_resized, p4, p5_resized], dim=1)
+        # Concatenate untuk global context (now all have same channels)
+        combined = torch.cat([p3_resized, p4, p5_resized], dim=1)  # [B, target_c * 3, H, W]
+        
+        # Build attention_gen if not exists or channels changed
+        total_channels = combined.shape[1]
+        if self.attention_gen is None or (hasattr(self.attention_gen, '__getitem__') and 
+                                         hasattr(self.attention_gen[0], 'conv') and 
+                                         self.attention_gen[0].conv.in_channels != total_channels):
+            self.attention_gen = nn.Sequential(
+                Conv(total_channels, target_c, 1),
+                nn.ReLU(),
+                Conv(target_c, 3, 1),  # 3 weights untuk P3, P4, P5
+                nn.Softmax(dim=1)
+            ).to(combined.device)
+            self.add_module('attention_gen', self.attention_gen)  # Register as submodule
 
         # Generate attention weights
         weights = self.attention_gen(combined)  # [B, 3, H, W]
