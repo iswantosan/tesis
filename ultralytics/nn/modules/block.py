@@ -1074,7 +1074,22 @@ class CrossLevelAttention(nn.Module):
             nn.Softmax(dim=1)
         )
 
-    def forward(self, p3, p4, p5):
+    def forward(self, x):
+        """
+        Forward pass through CrossLevelAttention.
+        
+        Args:
+            x: List or tuple of 3 tensors [P3, P4, P5]
+        
+        Returns:
+            List of enhanced features [P3, P4, P5]
+        """
+        # Unpack inputs (compatible dengan YOLO parser yang pass list)
+        if isinstance(x, (list, tuple)) and len(x) == 3:
+            p3, p4, p5 = x
+        else:
+            raise ValueError(f"CrossLevelAttention expects list of 3 tensors [P3, P4, P5], got {type(x)}")
+        
         # Resize semua ke ukuran P4 (middle size)
         p3_resized = F.interpolate(p3, size=p4.shape[-2:], mode='nearest')
         p5_resized = F.interpolate(p5, size=p4.shape[-2:], mode='nearest')
