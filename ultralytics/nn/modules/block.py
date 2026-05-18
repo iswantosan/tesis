@@ -44,6 +44,7 @@ __all__ = (
     "C3k2",
     "C3k2Attn",
     "C3k2AttnV2",
+    "C3k2AttnV3",
     "C2fPSA",
     "C2PSA",
     "RepVGGDW",
@@ -904,8 +905,77 @@ class C3k2AttnV2(C3k2):
         out = self.attn_eca(out)
         # Apply CoordinateAttention for spatial-channel attention
         out = self.attn_coord(out)
-        
+
         return out
+
+
+class C3k2AttnV3(C3k2):
+    """
+    C3k2AttnV3 — Identity-init Hybrid Attention (fixes silent no-op of C3k2Attn V1).
+
+    Root causes of V1 having ~zero mAP impact:
+      1. BN downstream absorbs uniform scale from sigmoid (output * 0.5 → BN normalizes away)
+      2. ECA is channel-only; no spatial signal for small objects
+      3. Random init perturbs features → weak gradient to learn modulation
+      4. Sigmoid only attenuates [0,1] — cannot boost above identity
+
+    Fixes:
+      - Learnable gate alpha initialized to 0 (LayerScale-style identity init).
+        At step 0, output == feat → guaranteed no baseline regression.
+      - Hybrid channel (ECA-style) + spatial (7x7 over [avg, max]) attention.
+      - Sigmoid output shifted from [0,1] → [-1,1] so modulation is bidirectional.
+      - Residual gated formula bypasses BN absorption:
+            out = feat + alpha * feat * (ch_mod * sp_mod)
+
+    Args mirror C3k2 exactly; no extra YAML arguments needed.
+    """
+
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        c3k = bool(c3k) if isinstance(c3k, (int, float, str)) else c3k
+        e = float(e) if not isinstance(e, bool) else e
+        g = int(g) if not isinstance(g, bool) else g
+        shortcut = bool(shortcut) if isinstance(shortcut, (int, float, str)) else shortcut
+        super().__init__(c1, c2, n, c3k, e, g, shortcut)
+
+        # ECA-style channel attention with adaptive kernel
+        t = int(abs((math.log(c2, 2) + 1) / 2))
+        k_ch = t if t % 2 else t + 1
+        self.ch_pool = nn.AdaptiveAvgPool2d(1)
+        self.ch_conv = nn.Conv1d(1, 1, kernel_size=k_ch, padding=k_ch // 2, bias=False)
+
+        # Spatial attention: 7x7 conv on concat([avg, max]) across channels
+        self.sp_conv = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+
+        self.sigmoid = nn.Sigmoid()
+
+        # Identity-init learnable gate (alpha=0 → output = feat at start)
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        feat = self.cv2(torch.cat(y, 1))
+
+        # Channel attention (ECA-style)
+        ch = self.ch_pool(feat)
+        ch = self.ch_conv(ch.squeeze(-1).transpose(-1, -2))
+        ch = ch.transpose(-1, -2).unsqueeze(-1)
+        ch_mod = (self.sigmoid(ch) - 0.5) * 2  # [-1, 1]
+
+        # Spatial attention (CBAM-style spatial gate)
+        sp_avg = feat.mean(dim=1, keepdim=True)
+        sp_max = feat.max(dim=1, keepdim=True)[0]
+        sp = self.sp_conv(torch.cat([sp_avg, sp_max], dim=1))
+        sp_mod = (self.sigmoid(sp) - 0.5) * 2  # [-1, 1]
+
+        # Combined modulation: channel x spatial (both must agree)
+        modulation = ch_mod * sp_mod  # broadcasts to [B, C, H, W]
+
+        # Residual gated output (identity at init via alpha=0)
+        return feat + self.alpha * feat * modulation
 
 
 class C3k(C3):

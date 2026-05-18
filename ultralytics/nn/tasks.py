@@ -39,6 +39,7 @@ from ultralytics.nn.modules import (
     C3k2,
     C3k2Attn,
     C3k2AttnV2,
+    C3k2AttnV3,
     C3x,
     CBFuse,
     CBLinear,
@@ -1116,6 +1117,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3k2,
             C3k2Attn,
             C3k2AttnV2,
+            C3k2AttnV3,
             RepNCSPELAN4,
             ELAN1,
             ADown,
@@ -1184,6 +1186,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C3k2,
                 C3k2Attn,
                 C3k2AttnV2,
+                C3k2AttnV3,
                 C3_EMA,
                 C2fAttn,
                 C3,
@@ -1243,7 +1246,23 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                         args[4] = float(args[4])  # e (expansion) must be float
                     except (ValueError, TypeError):
                         args[4] = 0.5  # default to 0.5 if conversion fails
-            if m is A2C2f: 
+            if m is C3k2AttnV3:  # C3k2AttnV3 - identity-init hybrid attention (channel + spatial)
+                legacy = False
+                # Same arg sanitization as V1/V2: args format after insert(2, n) is
+                # [c1, c2, n, c3k, e, g, shortcut]
+                if len(args) > 0 and isinstance(args[-1], str) and args[-1] not in ['True', 'False', 'true', 'false']:
+                    args = args[:-1]
+                if len(args) > 5:
+                    try:
+                        args[5] = int(args[5])
+                    except (ValueError, TypeError):
+                        args[5] = 1
+                if len(args) > 4:
+                    try:
+                        args[4] = float(args[4])
+                    except (ValueError, TypeError):
+                        args[4] = 0.5
+            if m is A2C2f:
                 legacy = False
                 if scale and scale in "lx":  # for L/X sizes
                     args.append(True)
