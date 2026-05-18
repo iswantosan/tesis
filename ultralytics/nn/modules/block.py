@@ -45,6 +45,8 @@ __all__ = (
     "C3k2Attn",
     "C3k2AttnV2",
     "C3k2AttnV3",
+    "C3k2AttnV4",
+    "C3k2AttnV5",
     "C2fPSA",
     "C2PSA",
     "RepVGGDW",
@@ -976,6 +978,144 @@ class C3k2AttnV3(C3k2):
 
         # Residual gated output (identity at init via alpha=0)
         return feat + self.alpha * feat * modulation
+
+
+class C3k2AttnV4(C3k2):
+    """
+    C3k2 + lightweight area-attention (memory-efficient alternative to A2C2f at P3).
+
+    Designed for high-resolution feature maps (P3 80x80) where A2C2f area=1
+    is memory-prohibitive (~660 MB attention matrix per batch). Uses high
+    `area` division so attention is computed within smaller regions:
+        memory = O(B * area * (N/area)^2) = O(B * N^2 / area)
+
+    Compared to A2C2f at P3:
+      - A2C2f stacks n=2 with 2 ABlocks each = 4 AAttn modules.
+      - C3k2AttnV4 uses only 1 AAttn at the end -> ~4x cheaper.
+
+    Channel bottleneck: attention computed at c_attn = c2/2 to further save memory.
+    Identity-init alpha gate -> no baseline regression at training start.
+
+    Args:
+        c1, c2, n, c3k, e: standard C3k2 args
+        area: number of regions to split the feature map into.
+              N (= H*W) must be divisible by area.
+              Common choices for P3 80x80 (N=6400): 4, 8, 16, 25
+              Common choices for P3 128x128 (N=16384) at imgsz=1024: 4, 8, 16, 32
+              Default 4 (matches A2C2f convention).
+    """
+
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, area=4, g=1, shortcut=True):
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        c3k = bool(c3k) if isinstance(c3k, (int, float, str)) else c3k
+        e = float(e) if not isinstance(e, bool) else e
+        area = int(area)
+        g = int(g) if not isinstance(g, bool) else g
+        shortcut = bool(shortcut) if isinstance(shortcut, (int, float, str)) else shortcut
+        super().__init__(c1, c2, n, c3k, e, g, shortcut)
+
+        # Bottleneck channels for attention (half of c2)
+        c_attn = c2 // 2
+        assert c_attn % 32 == 0, (
+            f"C3k2AttnV4: c_attn={c_attn} must be multiple of 32 (got c2={c2}). "
+            f"Use c2 in {{64, 128, 256, 512, ...}} after scaling."
+        )
+        num_heads = max(1, c_attn // 32)
+
+        self.attn_reduce = Conv(c2, c_attn, 1, 1)
+        self.attn = AAttn(c_attn, num_heads=num_heads, area=area)
+        self.attn_expand = Conv(c_attn, c2, 1, 1, act=False)
+
+        # Identity-init gate
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        feat = self.cv2(torch.cat(y, 1))
+
+        # Bottlenecked area-attention
+        a = self.attn_reduce(feat)
+        a = self.attn(a)
+        a = self.attn_expand(a)
+
+        # Residual identity-init gating
+        return feat + self.alpha * a
+
+
+class C3k2AttnV5(C3k2):
+    """
+    C3k2 + DUAL lightweight attention (channel ECA + spatial area-attention).
+
+    Combines:
+      - Channel attention (ECA-style, very cheap, identifies important channels)
+      - Spatial attention (lightweight area-attention from V4, identifies
+        important regions)
+
+    Both gated independently by separate identity-init alphas (alpha_ch, alpha_sp)
+    so the network can learn to use only one, both, or neither.
+
+    Why dual:
+      - Channel: which feature channels matter for bacilli (texture/edge)
+      - Spatial: where in the image the bacilli are (high-res localization)
+      - Both signals are complementary; small objects benefit from spatial,
+        feature selection benefits from channel.
+
+    Args: same as C3k2AttnV4.
+    """
+
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, area=4, g=1, shortcut=True):
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        c3k = bool(c3k) if isinstance(c3k, (int, float, str)) else c3k
+        e = float(e) if not isinstance(e, bool) else e
+        area = int(area)
+        g = int(g) if not isinstance(g, bool) else g
+        shortcut = bool(shortcut) if isinstance(shortcut, (int, float, str)) else shortcut
+        super().__init__(c1, c2, n, c3k, e, g, shortcut)
+
+        # --- Channel attention (ECA-style, adaptive kernel) ---
+        t = int(abs((math.log(c2, 2) + 1) / 2))
+        k_ch = t if t % 2 else t + 1
+        self.ch_pool = nn.AdaptiveAvgPool2d(1)
+        self.ch_conv = nn.Conv1d(1, 1, kernel_size=k_ch, padding=k_ch // 2, bias=False)
+        self.ch_sigmoid = nn.Sigmoid()
+
+        # --- Spatial area-attention (lightweight, bottlenecked) ---
+        c_attn = c2 // 2
+        assert c_attn % 32 == 0, (
+            f"C3k2AttnV5: c_attn={c_attn} must be multiple of 32 (got c2={c2})."
+        )
+        num_heads = max(1, c_attn // 32)
+        self.attn_reduce = Conv(c2, c_attn, 1, 1)
+        self.attn = AAttn(c_attn, num_heads=num_heads, area=area)
+        self.attn_expand = Conv(c_attn, c2, 1, 1, act=False)
+
+        # Independent identity-init gates
+        self.alpha_ch = nn.Parameter(torch.zeros(1))
+        self.alpha_sp = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        feat = self.cv2(torch.cat(y, 1))
+
+        # Channel modulation: ECA -> [0,1] -> [-1,1] for bidirectional gating
+        ch = self.ch_pool(feat)
+        ch = self.ch_conv(ch.squeeze(-1).transpose(-1, -2))
+        ch = ch.transpose(-1, -2).unsqueeze(-1)
+        ch_mod = (self.ch_sigmoid(ch) - 0.5) * 2
+
+        # Spatial area-attention (bottlenecked)
+        a = self.attn_reduce(feat)
+        a = self.attn(a)
+        a = self.attn_expand(a)
+
+        # Dual identity-init residual gating
+        return feat + self.alpha_ch * feat * ch_mod + self.alpha_sp * a
 
 
 class C3k(C3):

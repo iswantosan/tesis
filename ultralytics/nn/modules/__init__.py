@@ -45,6 +45,8 @@ from .block import (
     C3k2Attn,
     C3k2AttnV2,
     C3k2AttnV3,
+    C3k2AttnV4,
+    C3k2AttnV5,
     C3x,
     CBFuse,
     CBLinear,
