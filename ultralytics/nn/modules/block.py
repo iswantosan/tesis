@@ -47,6 +47,7 @@ __all__ = (
     "C3k2AttnV3",
     "C3k2AttnV4",
     "C3k2AttnV5",
+    "C3k2AttnV6",
     "C2fPSA",
     "C2PSA",
     "RepVGGDW",
@@ -1116,6 +1117,95 @@ class C3k2AttnV5(C3k2):
 
         # Dual identity-init residual gating
         return feat + self.alpha_ch * feat * ch_mod + self.alpha_sp * a
+
+
+class C3k2AttnV6(C3k2):
+    """
+    C3k2 + Coordinate Attention (CA, Hou et al. CVPR 2021) — direction-aware
+    attention designed to actually impact mAP on elongated small objects.
+
+    Why this variant (vs V4/V5 which often show no mAP gain):
+      1. NO identity-init alpha gate. V4/V5 start with alpha=0 ("identity init"
+         to avoid early regression). On small datasets with short training
+         (e.g. 60 epoch, 1k images), alpha typically stays near zero because
+         the gradient pull on a single scalar gate is weak. Result: attention
+         path silently never activates and mAP equals baseline. V6 multiplies
+         the input by a sigmoid-bounded attention map directly, so the path
+         is always active and learned end-to-end.
+      2. Coordinate Attention instead of generic area attention. CA decomposes
+         2D global pooling into TWO 1D pooling operations (along H and along W),
+         then re-combines them. This explicitly captures axis-aligned long-range
+         dependencies — ideal for elongated rod-shaped objects (BTA: ~24 percent
+         of bboxes have w/h > 2 or < 0.5). Area attention treats regions as
+         square patches and misses this directional structure.
+      3. Full-channel transform (no c_attn=c2/2 bottleneck). The CA mip
+         reduction ratio is applied to the small intermediate transform only,
+         and attention is broadcast back to the full c2 channels. Avoids the
+         info loss V4/V5 introduce via channel halving.
+      4. Multiplicative re-weight on the C3k2 output BEFORE returning.
+         Downstream layers see the attended features, not an optional add-on.
+
+    Cost: ~0.5-1 percent params overhead vs C3k2 (CA is tiny). FLOPs minimal.
+    Memory: friendly to high-resolution feature maps like P3 80x80.
+
+    Args:
+        c1, c2, n, c3k, e, g, shortcut: standard C3k2 args.
+        reduction (int): CA bottleneck ratio (default 32). Smaller = more
+            attention capacity. With c2=256 and reduction=32, mip=8.
+    """
+
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, reduction=32):
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        c3k = bool(c3k) if isinstance(c3k, (int, float, str)) else c3k
+        e = float(e) if not isinstance(e, bool) else e
+        g = int(g) if not isinstance(g, bool) else g
+        shortcut = bool(shortcut) if isinstance(shortcut, (int, float, str)) else shortcut
+        reduction = int(reduction)
+        super().__init__(c1, c2, n, c3k, e, g, shortcut)
+
+        # CA intermediate channels (at least 8 to keep representation useful)
+        mip = max(8, c2 // reduction)
+
+        # Direction-aware global pooling (no learnable params)
+        self.ca_pool_h = nn.AdaptiveAvgPool2d((None, 1))   # pool along W -> (B,C,H,1)
+        self.ca_pool_w = nn.AdaptiveAvgPool2d((1, None))   # pool along H -> (B,C,1,W)
+
+        # Shared 1x1 transform on concatenated H+W descriptors
+        self.ca_conv = nn.Conv2d(c2, mip, kernel_size=1, stride=1, padding=0)
+        self.ca_bn = nn.BatchNorm2d(mip)
+        self.ca_act = nn.Hardswish(inplace=True)
+
+        # Per-direction attention generators (back to c2)
+        self.ca_conv_h = nn.Conv2d(mip, c2, kernel_size=1, stride=1, padding=0)
+        self.ca_conv_w = nn.Conv2d(mip, c2, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        # Standard C3k2 transformation
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        feat = self.cv2(torch.cat(y, 1))
+
+        # Coordinate Attention on the output (always active, no gate)
+        n, c, h, w = feat.shape
+
+        # Direction-aware pooling
+        x_h = self.ca_pool_h(feat)                              # (n, c, h, 1)
+        x_w = self.ca_pool_w(feat).permute(0, 1, 3, 2)          # (n, c, w, 1)
+
+        # Shared encode on concatenated descriptors
+        y_ca = torch.cat([x_h, x_w], dim=2)                     # (n, c, h+w, 1)
+        y_ca = self.ca_act(self.ca_bn(self.ca_conv(y_ca)))      # (n, mip, h+w, 1)
+
+        # Split back to per-direction and decode to per-axis attention maps
+        x_h, x_w = torch.split(y_ca, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)                           # (n, mip, 1, w)
+        a_h = self.ca_conv_h(x_h).sigmoid()                     # (n, c, h, 1)
+        a_w = self.ca_conv_w(x_w).sigmoid()                     # (n, c, 1, w)
+
+        # Broadcast multiplication: (n,c,h,1) * (n,c,1,w) gives (n,c,h,w)
+        return feat * a_h * a_w
 
 
 class C3k(C3):

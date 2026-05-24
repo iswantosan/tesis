@@ -42,6 +42,7 @@ from ultralytics.nn.modules import (
     C3k2AttnV3,
     C3k2AttnV4,
     C3k2AttnV5,
+    C3k2AttnV6,
     C3x,
     CBFuse,
     CBLinear,
@@ -1122,6 +1123,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3k2AttnV3,
             C3k2AttnV4,
             C3k2AttnV5,
+            C3k2AttnV6,
             RepNCSPELAN4,
             ELAN1,
             ADown,
@@ -1193,6 +1195,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C3k2AttnV3,
                 C3k2AttnV4,
                 C3k2AttnV5,
+                C3k2AttnV6,
                 C3_EMA,
                 C2fAttn,
                 C3,
@@ -1287,6 +1290,31 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                         args[5] = int(args[5])
                     except (ValueError, TypeError):
                         args[5] = 4
+            if m is C3k2AttnV6:  # Coordinate Attention variant (no gate, direction-aware)
+                legacy = False
+                # Signature: (c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, reduction=32)
+                # After insert(2, n): args = [c1, c2, n, c3k, e, g, shortcut, reduction]
+                # NOTE: args[5] is `g` like V1/V2/V3 (NOT area like V4/V5).
+                if len(args) > 0 and isinstance(args[-1], str) and args[-1] not in ['True', 'False', 'true', 'false']:
+                    args = args[:-1]
+                # Ensure e (expansion) at index 4 is float
+                if len(args) > 4:
+                    try:
+                        args[4] = float(args[4])
+                    except (ValueError, TypeError):
+                        args[4] = 0.5
+                # Ensure g (groups) at index 5 is int
+                if len(args) > 5:
+                    try:
+                        args[5] = int(args[5])
+                    except (ValueError, TypeError):
+                        args[5] = 1
+                # Ensure reduction (CA bottleneck ratio) at index 7 is int if provided
+                if len(args) > 7:
+                    try:
+                        args[7] = int(args[7])
+                    except (ValueError, TypeError):
+                        args[7] = 32
             if m is A2C2f:
                 legacy = False
                 if scale and scale in "lx":  # for L/X sizes
